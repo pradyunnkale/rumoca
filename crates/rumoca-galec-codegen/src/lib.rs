@@ -75,6 +75,7 @@ pub mod lower;
 pub mod mangle;
 pub mod manifest_context;
 pub mod manifest_vars;
+pub mod numerical;
 pub mod package;
 pub mod production_manifest;
 

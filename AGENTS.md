@@ -22,6 +22,7 @@ spec, it's not a rule — propose a spec change first.
 | If you are touching... | Read these specs |
 |---|---|
 | Compiler pipeline / any IR / any phase | [SPEC_0007](spec/SPEC_0007_IR_PIPELINE.md) — IR stage contracts, structural-transformation scope |
+| GALEC numerical analysis / planning / embedded numerical kernels | [SPEC_0035](spec/SPEC_0035_GALEC_NUMERICAL_PLANNING.md) — fact ownership, proof soundness, target routing |
 | Range-preserving array/tensor/stencil IR | [SPEC_0032](spec/SPEC_0032_RANGE_PRESERVING_TENSORS.md) — compact domains, scalar views, Map/AffineStencil ownership |
 | Crate dependencies, foundation types, re-exports, single-source helpers | [SPEC_0029](spec/SPEC_0029_CRATE_BOUNDARIES.md) |
 | Modelica semantics (any MLS-affecting change) | [SPEC_0022](spec/SPEC_0022_MLS_COMPILER_COMPLIANCE.md) (use its section index) |
