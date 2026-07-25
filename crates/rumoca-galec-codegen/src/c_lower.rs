@@ -153,6 +153,9 @@ impl<'a> CContextLowerer<'a> {
             })]);
         }
         if let Some(dimensions) = self.whole_array_dimensions(target) {
+            if let Some(context) = self.special_array_context(target, dimensions, value)? {
+                return Ok(vec![context]);
+            }
             if let Some(context) = self.simple_array_binary_context(target, dimensions, value)? {
                 return Ok(vec![context]);
             }
@@ -528,7 +531,7 @@ impl<'a> CContextLowerer<'a> {
         else {
             return Ok(None);
         };
-        if self.expression_needs_indexing(sample_period) {
+        if !self.is_array_free_scalar_expression(sample_period) {
             return Ok(None);
         }
         let Some(angular_rate) = first_indexed_real_vector(scaled_rate, self.names, 3) else {
@@ -588,6 +591,215 @@ impl<'a> CContextLowerer<'a> {
             && self.names.array_dimensions(name) == Some([length].as_slice())
     }
 
+    fn special_array_context(
+        &self,
+        target: &Reference,
+        dimensions: &[i64],
+        value: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        if let Some(context) = self.array_add_add_scaled_context(target, dimensions, value)? {
+            return Ok(Some(context));
+        }
+        if let Some(context) = self.array_add_scaled2_context(target, dimensions, value)? {
+            return Ok(Some(context));
+        }
+        self.quaternion_normalize_context(target, dimensions, value)
+    }
+
+    fn array_add_add_scaled_context(
+        &self,
+        target: &Reference,
+        dimensions: &[i64],
+        value: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Expression::Binary {
+            op: BinaryOp::Add,
+            lhs: sum,
+            rhs: scaled,
+        } = unparen(value)
+        else {
+            return Ok(None);
+        };
+        let Expression::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } = unparen(sum)
+        else {
+            return Ok(None);
+        };
+        let Some(lhs) = self.whole_real_array_operand(lhs, dimensions) else {
+            return Ok(None);
+        };
+        let Some(rhs) = self.whole_real_array_operand(rhs, dimensions) else {
+            return Ok(None);
+        };
+        let Some((scale, scaled_array)) = self.scalar_times_array(scaled, dimensions) else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::json!({
+            "kind": "array_add_add_scaled",
+            "target": self.reference_context(target)?,
+            "lhs": self.reference_context(&lhs)?,
+            "rhs": self.reference_context(&rhs)?,
+            "scale": self.expression_context(scale)?,
+            "scaled": self.reference_context(&scaled_array)?,
+            "dimensions": dimensions,
+            "element_count": element_count(dimensions)?,
+        })))
+    }
+
+    fn array_add_scaled2_context(
+        &self,
+        target: &Reference,
+        dimensions: &[i64],
+        value: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Expression::Binary {
+            op: BinaryOp::Add,
+            lhs: base,
+            rhs: scaled,
+        } = unparen(value)
+        else {
+            return Ok(None);
+        };
+        let Some(base) = self.whole_real_array_operand(base, dimensions) else {
+            return Ok(None);
+        };
+        let Expression::Binary {
+            op: BinaryOp::Mul,
+            lhs: first_product,
+            rhs: scale2,
+        } = unparen(scaled)
+        else {
+            return Ok(None);
+        };
+        if self.expression_needs_indexing(scale2) {
+            return Ok(None);
+        }
+        let Some((scale1, scaled_array)) = self.scalar_times_array(first_product, dimensions)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::json!({
+            "kind": "array_add_scaled2",
+            "target": self.reference_context(target)?,
+            "base": self.reference_context(&base)?,
+            "scale1": self.expression_context(scale1)?,
+            "scaled": self.reference_context(&scaled_array)?,
+            "scale2": self.expression_context(scale2)?,
+            "dimensions": dimensions,
+            "element_count": element_count(dimensions)?,
+        })))
+    }
+
+    fn quaternion_normalize_context(
+        &self,
+        target: &Reference,
+        dimensions: &[i64],
+        value: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        if dimensions != [4] {
+            return Ok(None);
+        }
+        let Expression::If(if_expression) = unparen(value) else {
+            return Ok(None);
+        };
+        let [(condition, normalized)] = if_expression.branches.as_slice() else {
+            return Ok(None);
+        };
+        let Expression::Binary {
+            op: BinaryOp::Div,
+            lhs: quaternion,
+            rhs: norm,
+        } = unparen(normalized)
+        else {
+            return Ok(None);
+        };
+        let Some(quaternion) = self.whole_real_array_operand(quaternion, dimensions) else {
+            return Ok(None);
+        };
+        if !self.is_array_free_scalar_expression(norm)
+            || !self.is_array_free_scalar_expression(condition)
+            || !is_quaternion_identity_literal(&if_expression.else_value)
+        {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::json!({
+            "kind": "quat_normalize_if",
+            "target": self.reference_context(target)?,
+            "quaternion": self.reference_context(&quaternion)?,
+            "norm": self.expression_context(norm)?,
+            "condition": self.expression_context(condition)?,
+            "dimensions": dimensions,
+        })))
+    }
+
+    fn scalar_times_array<'b>(
+        &self,
+        expression: &'b Expression,
+        dimensions: &[i64],
+    ) -> Option<(&'b Expression, Reference)> {
+        let Expression::Binary {
+            op: BinaryOp::Mul,
+            lhs,
+            rhs,
+        } = unparen(expression)
+        else {
+            return None;
+        };
+        if let Some(array) = self.whole_real_array_operand(rhs, dimensions)
+            && self.is_array_free_scalar_expression(lhs)
+        {
+            return Some((lhs, array));
+        }
+        if let Some(array) = self.whole_real_array_operand(lhs, dimensions)
+            && self.is_array_free_scalar_expression(rhs)
+        {
+            return Some((rhs, array));
+        }
+        None
+    }
+
+    fn whole_real_array_operand(
+        &self,
+        expression: &Expression,
+        dimensions: &[i64],
+    ) -> Option<Reference> {
+        let Expression::Ref(reference) = unparen(expression) else {
+            return None;
+        };
+        let name = single_part_name(reference)?;
+        (self.whole_array_dimensions(reference) == Some(dimensions)
+            && self.names.scalar_type(name) == Some(rumoca_ir_galec::ast::ScalarType::Real))
+        .then(|| reference.clone())
+    }
+
+    fn is_array_free_scalar_expression(&self, expression: &Expression) -> bool {
+        match unparen(expression) {
+            Expression::Bool(_) | Expression::Integer(_) | Expression::Real(_) => true,
+            Expression::Ref(reference) | Expression::Neg(reference) => single_part_name(reference)
+                .is_some_and(|name| self.names.array_dimensions(name).is_none()),
+            Expression::Call(call) => call
+                .arguments
+                .iter()
+                .all(|argument| self.is_array_free_scalar_expression(argument)),
+            Expression::Not(inner) => self.is_array_free_scalar_expression(inner),
+            Expression::If(if_expression) => {
+                if_expression.branches.iter().all(|(condition, value)| {
+                    self.is_array_free_scalar_expression(condition)
+                        && self.is_array_free_scalar_expression(value)
+                }) && self.is_array_free_scalar_expression(&if_expression.else_value)
+            }
+            Expression::Binary { lhs, rhs, .. } => {
+                self.is_array_free_scalar_expression(lhs)
+                    && self.is_array_free_scalar_expression(rhs)
+            }
+            Expression::Paren(inner) => self.is_array_free_scalar_expression(inner),
+            Expression::Array(_) | Expression::Size { .. } => false,
+        }
+    }
+
     fn simple_array_binary_context(
         &self,
         target: &Reference,
@@ -618,13 +830,7 @@ impl<'a> CContextLowerer<'a> {
         if lhs["kind"] == "scalar" && rhs["kind"] == "scalar" {
             return Ok(None);
         }
-        let element_count = dimensions.iter().try_fold(1_i64, |count, dimension| {
-            count
-                .checked_mul(*dimension)
-                .ok_or_else(|| GalecTargetError::LoweringInternal {
-                    detail: "C export array element count overflowed i64".to_owned(),
-                })
-        })?;
+        let element_count = element_count(dimensions)?;
         Ok(Some(serde_json::json!({
             "kind": "array_binary",
             "operator": binary_op_name(*op),
@@ -651,7 +857,7 @@ impl<'a> CContextLowerer<'a> {
                 "reference": self.reference_context(reference)?,
             })));
         }
-        if !self.expression_needs_indexing(expression) {
+        if self.is_array_free_scalar_expression(expression) {
             return Ok(Some(serde_json::json!({
                 "kind": "scalar",
                 "value": self.expression_context(expression)?,
@@ -887,6 +1093,30 @@ fn single_part_name(reference: &Reference) -> Option<&Name> {
         return None;
     };
     Some(&part.name)
+}
+
+fn element_count(dimensions: &[i64]) -> Result<i64, GalecTargetError> {
+    dimensions.iter().try_fold(1_i64, |count, dimension| {
+        count
+            .checked_mul(*dimension)
+            .ok_or_else(|| GalecTargetError::LoweringInternal {
+                detail: "C export array element count overflowed i64".to_owned(),
+            })
+    })
+}
+
+fn is_quaternion_identity_literal(expression: &Expression) -> bool {
+    let Expression::Array(elements) = unparen(expression) else {
+        return false;
+    };
+    let expected = [1.0_f64, 0.0, 0.0, 0.0];
+    elements.len() == expected.len()
+        && elements
+            .iter()
+            .zip(expected)
+            .all(|(element, expected)| {
+                matches!(unparen(element), Expression::Real(value) if value.to_bits() == expected.to_bits())
+            })
 }
 
 fn component_assignment_group<'a>(
@@ -1251,6 +1481,8 @@ mod tests {
         let mut block = Block::new(Name::ident("ArrayHelper"));
         block.protected = vec![
             real_array("input", &[3]),
+            real_array("bias", &[3]),
+            real_array("correction", &[3]),
             real_array("output", &[3]),
             ProtectedEntity {
                 kind: ProtectedKind::State,
@@ -1278,6 +1510,28 @@ mod tests {
         assert_eq!(contexts[0]["lhs"]["kind"], "array");
         assert_eq!(contexts[0]["rhs"]["kind"], "scalar");
         assert_eq!(contexts[0]["element_count"], 3);
+
+        let affine = Statement::Assignment {
+            target: state_ref("output", None),
+            value: Expression::Binary {
+                op: BinaryOp::Add,
+                lhs: Box::new(Expression::Binary {
+                    op: BinaryOp::Add,
+                    lhs: Box::new(Expression::Ref(state_ref("input", None))),
+                    rhs: Box::new(Expression::Ref(state_ref("bias", None))),
+                }),
+                rhs: Box::new(Expression::Binary {
+                    op: BinaryOp::Mul,
+                    lhs: Box::new(Expression::Ref(state_ref("scale", None))),
+                    rhs: Box::new(Expression::Ref(state_ref("correction", None))),
+                }),
+            },
+        };
+        let contexts = CContextLowerer::new(&names)
+            .statement_contexts(&affine)
+            .expect("lower affine array helper");
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["kind"], "array_add_add_scaled");
     }
 
     #[test]

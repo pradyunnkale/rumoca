@@ -154,6 +154,8 @@ positive-definiteness inference is implemented.
 | 3D cross product | Complete ordered three-component determinant pattern | Preserve the original component assignments |
 | Quaternion gravity rotation | Complete ordered three-component unit-axis rotation pattern | Preserve the original component assignments |
 | Quaternion angular-rate integration | Complete ordered four-component first-order integration pattern | Preserve the original component assignments |
+| Quaternion normalization with identity fallback | Whole-array division guarded by an if-expression with `{1,0,0,0}` fallback | Preserve the original component assignments |
+| Common vector affine forms | Exact whole-array add/scale expression trees | Preserve the original scalar-expanded expression |
 | Linear solve | Required for EKF | Pivoted general fallback |
 | Matrix product/transpose recognition | Deferred until a valid GALEC loop/function pattern exists | Existing generic emission |
 | Sparse kernels | Deferred | Dense fallback |

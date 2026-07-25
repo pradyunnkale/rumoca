@@ -58,12 +58,18 @@ rumoca_array_{{ value.operator }}_{{ "a" if value.lhs.kind == "array" else "s" }
 {{ padding(depth) }}{{ reference(value.target) }} = {{ expr(value.value) }};
 {%- elif value.kind == "array_binary" -%}
 {{ padding(depth) }}{{ array_binary_function(value) }}({{ flat_reference(value.target, value.dimensions) }}, {{ array_operand(value.lhs, value.dimensions) }}, {{ array_operand(value.rhs, value.dimensions) }}, {{ value.element_count }});
+{%- elif value.kind == "array_add_add_scaled" -%}
+{{ padding(depth) }}rumoca_array_add_add_scaled({{ flat_reference(value.target, value.dimensions) }}, {{ flat_reference(value.lhs, value.dimensions) }}, {{ flat_reference(value.rhs, value.dimensions) }}, {{ expr(value.scale) }}, {{ flat_reference(value.scaled, value.dimensions) }}, {{ value.element_count }});
+{%- elif value.kind == "array_add_scaled2" -%}
+{{ padding(depth) }}rumoca_array_add_scaled2({{ flat_reference(value.target, value.dimensions) }}, {{ flat_reference(value.base, value.dimensions) }}, {{ expr(value.scale1) }}, {{ flat_reference(value.scaled, value.dimensions) }}, {{ expr(value.scale2) }}, {{ value.element_count }});
 {%- elif value.kind == "cross3" -%}
 {{ padding(depth) }}rumoca_cross3({{ flat_reference(value.target, value.dimensions) }}, {{ flat_reference(value.lhs, value.dimensions) }}, {{ flat_reference(value.rhs, value.dimensions) }});
 {%- elif value.kind == "quat_gravity" -%}
 {{ padding(depth) }}rumoca_quat_gravity({{ flat_reference(value.target, value.target_dimensions) }}, {{ flat_reference(value.quaternion, value.quaternion_dimensions) }});
 {%- elif value.kind == "quat_integrate" -%}
 {{ padding(depth) }}rumoca_quat_integrate({{ flat_reference(value.target, value.target_dimensions) }}, {{ flat_reference(value.quaternion, value.quaternion_dimensions) }}, {{ flat_reference(value.angular_rate, value.angular_rate_dimensions) }}, {{ expr(value.sample_period) }});
+{%- elif value.kind == "quat_normalize_if" -%}
+{{ padding(depth) }}rumoca_quat_normalize_if({{ flat_reference(value.target, value.dimensions) }}, {{ flat_reference(value.quaternion, value.dimensions) }}, {{ expr(value.norm) }}, {{ expr(value.condition) }});
 {%- elif value.kind == "if" -%}
 {%- for branch in value.branches %}
 {{ padding(depth) }}{% if loop.first %}if{% else %}else if{% endif %} ({{ expr(branch.condition) }}) {
@@ -151,6 +157,31 @@ RUMOCA_MAYBE_UNUSED static inline void rumoca_quat_integrate(
         - q[1] * angular_rate[2]) + q[3] * angular_rate[0])) * sample_period;
     out[3] = q[3] + (0.5 * (((q[0] * angular_rate[2])
         + q[1] * angular_rate[1]) - q[2] * angular_rate[0])) * sample_period;
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_quat_normalize_if(
+    double out[4], const double q[4], double norm, bool condition) {
+    if (condition) {
+        for (size_t i = 0; i < 4; ++i) out[i] = q[i] / norm;
+    } else {
+        out[0] = 1.0;
+        out[1] = 0.0;
+        out[2] = 0.0;
+        out[3] = 0.0;
+    }
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_add_add_scaled(
+    double *out, const double *lhs, const double *rhs, double scale,
+    const double *scaled, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        out[i] = (lhs[i] + rhs[i]) + (scale * scaled[i]);
+    }
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_add_scaled2(
+    double *out, const double *base, double scale1, const double *scaled,
+    double scale2, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        out[i] = base[i] + ((scale1 * scaled[i]) * scale2);
+    }
 }
 RUMOCA_MAYBE_UNUSED static inline void rumoca_array_add_aa(
     double *out, const double *lhs, const double *rhs, size_t count) {

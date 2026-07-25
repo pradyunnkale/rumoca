@@ -123,6 +123,22 @@ fn galec_c_template_renders_statement_if_as_blocks_and_expression_if_as_ternary(
                 "target_dimensions": [4],
                 "quaternion_dimensions": [4],
                 "angular_rate_dimensions": [3]
+            }, {
+                "kind": "array_add_add_scaled",
+                "target": reference("corrected"),
+                "lhs": reference("gyro"),
+                "rhs": reference("bias"),
+                "scale": {"kind": "ref", "reference": reference("kp")},
+                "scaled": reference("error"),
+                "dimensions": [3],
+                "element_count": 3
+            }, {
+                "kind": "quat_normalize_if",
+                "target": reference("quaternion"),
+                "quaternion": reference("next_quaternion"),
+                "norm": {"kind": "ref", "reference": reference("norm")},
+                "condition": {"kind": "ref", "reference": reference("valid")},
+                "dimensions": [4]
             }]
         }
     });
@@ -163,6 +179,18 @@ fn galec_c_template_renders_statement_if_as_blocks_and_expression_if_as_ternary(
     assert!(
         rendered.contains(
             "rumoca_quat_integrate(&self->next_quaternion[0], &self->quaternion[0], &self->gyro[0], self->dt);"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "rumoca_array_add_add_scaled(&self->corrected[0], &self->gyro[0], &self->bias[0], self->kp, &self->error[0], 3);"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "rumoca_quat_normalize_if(&self->quaternion[0], &self->next_quaternion[0], self->norm, self->valid);"
         ),
         "{rendered}"
     );
