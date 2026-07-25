@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use rumoca_ir_galec::ast::{Block, Dimension, Expression, Name};
+use rumoca_ir_galec::ast::{Block, Dimension, Expression, Name, ScalarType, TypeRef};
 
 use crate::diagnostic::GalecTargetError;
 use crate::mangle::manifest_name;
@@ -265,6 +265,7 @@ pub struct CNameTable {
     /// positive extents. A C array field is not assignable with `=`, so
     /// whole-array copies of these must be `memcpy`'d or expanded element-wise.
     array_dimensions: HashMap<String, Vec<i64>>,
+    scalar_types: HashMap<String, ScalarType>,
 }
 
 impl CNameTable {
@@ -282,6 +283,7 @@ impl CNameTable {
             .chain(block.protected.iter().map(|entity| &entity.decl));
         let mut by_spelling = HashMap::new();
         let mut array_dimensions = HashMap::new();
+        let mut scalar_types = HashMap::new();
         let mut owners: HashMap<String, String> = HashMap::new();
         for decl in declared {
             let spelling = manifest_name(&decl.name).to_owned();
@@ -299,11 +301,15 @@ impl CNameTable {
             if !decl.dimensions.is_empty() {
                 array_dimensions.insert(spelling.clone(), literal_dimensions(&decl.dimensions)?);
             }
+            if let TypeRef::Primitive(scalar_type) = &decl.ty {
+                scalar_types.insert(spelling.clone(), *scalar_type);
+            }
             by_spelling.insert(spelling, c_name);
         }
         Ok(Self {
             by_spelling,
             array_dimensions,
+            scalar_types,
         })
     }
 
@@ -323,6 +329,12 @@ impl CNameTable {
         self.array_dimensions
             .get(manifest_name(name))
             .map(Vec::as_slice)
+    }
+
+    /// Primitive scalar type of a declared GALEC entity.
+    #[must_use]
+    pub fn scalar_type(&self, name: &Name) -> Option<ScalarType> {
+        self.scalar_types.get(manifest_name(name)).copied()
     }
 
     /// The C identifier of a declared GALEC name.

@@ -131,6 +131,9 @@ impl<'a> CContextLowerer<'a> {
             })]);
         }
         if let Some(dimensions) = self.whole_array_dimensions(target) {
+            if let Some(context) = self.simple_array_binary_context(target, dimensions, value)? {
+                return Ok(vec![context]);
+            }
             let mut assignments = Vec::new();
             self.array_expression_context(
                 target,
@@ -261,6 +264,9 @@ impl<'a> CContextLowerer<'a> {
         &self,
         expression: &Expression,
     ) -> Result<serde_json::Value, GalecTargetError> {
+        if let Some(dot) = self.dot_product_context(expression)? {
+            return Ok(dot);
+        }
         Ok(match expression {
             Expression::Bool(value) => serde_json::json!({"kind": "bool", "value": value}),
             Expression::Integer(value) => {
@@ -347,6 +353,132 @@ impl<'a> CContextLowerer<'a> {
                 });
             }
         })
+    }
+
+    fn simple_array_binary_context(
+        &self,
+        target: &Reference,
+        dimensions: &[i64],
+        value: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Some(target_name) = single_part_name(target) else {
+            return Ok(None);
+        };
+        if self.names.scalar_type(target_name) != Some(rumoca_ir_galec::ast::ScalarType::Real) {
+            return Ok(None);
+        }
+        let Expression::Binary { op, lhs, rhs } = value else {
+            return Ok(None);
+        };
+        if !matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+        ) {
+            return Ok(None);
+        }
+        let Some(lhs) = self.array_binary_operand_context(lhs, dimensions)? else {
+            return Ok(None);
+        };
+        let Some(rhs) = self.array_binary_operand_context(rhs, dimensions)? else {
+            return Ok(None);
+        };
+        if lhs["kind"] == "scalar" && rhs["kind"] == "scalar" {
+            return Ok(None);
+        }
+        let element_count = dimensions.iter().try_fold(1_i64, |count, dimension| {
+            count
+                .checked_mul(*dimension)
+                .ok_or_else(|| GalecTargetError::LoweringInternal {
+                    detail: "C export array element count overflowed i64".to_owned(),
+                })
+        })?;
+        Ok(Some(serde_json::json!({
+            "kind": "array_binary",
+            "operator": binary_op_name(*op),
+            "target": self.reference_context(target)?,
+            "dimensions": dimensions,
+            "element_count": element_count,
+            "lhs": lhs,
+            "rhs": rhs,
+        })))
+    }
+
+    fn array_binary_operand_context(
+        &self,
+        expression: &Expression,
+        dimensions: &[i64],
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        if let Expression::Ref(reference) = expression
+            && self.whole_array_dimensions(reference) == Some(dimensions)
+            && single_part_name(reference).and_then(|name| self.names.scalar_type(name))
+                == Some(rumoca_ir_galec::ast::ScalarType::Real)
+        {
+            return Ok(Some(serde_json::json!({
+                "kind": "array",
+                "reference": self.reference_context(reference)?,
+            })));
+        }
+        if !self.expression_needs_indexing(expression) {
+            return Ok(Some(serde_json::json!({
+                "kind": "scalar",
+                "value": self.expression_context(expression)?,
+            })));
+        }
+        Ok(None)
+    }
+
+    fn dot_product_context(
+        &self,
+        expression: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let mut terms = Vec::new();
+        if !collect_left_associated_add_terms(expression, &mut terms) {
+            return Ok(None);
+        }
+        let Some(first) = terms.first() else {
+            return Ok(None);
+        };
+        let Some((lhs, rhs, first_index)) = dot_term(first) else {
+            return Ok(None);
+        };
+        let Some(lhs_name) = single_part_name(&lhs) else {
+            return Ok(None);
+        };
+        let Some(rhs_name) = single_part_name(&rhs) else {
+            return Ok(None);
+        };
+        if self.names.scalar_type(lhs_name) != Some(rumoca_ir_galec::ast::ScalarType::Real)
+            || self.names.scalar_type(rhs_name) != Some(rumoca_ir_galec::ast::ScalarType::Real)
+        {
+            return Ok(None);
+        }
+        let Some(lhs_dimensions @ [length]) = self.names.array_dimensions(lhs_name) else {
+            return Ok(None);
+        };
+        if self.names.array_dimensions(rhs_name) != Some(lhs_dimensions)
+            || terms.len() != usize::try_from(*length).unwrap_or(0)
+            || first_index != 1
+        {
+            return Ok(None);
+        }
+        for (offset, term) in terms.iter().enumerate().skip(1) {
+            let Some((term_lhs, term_rhs, index)) = dot_term(term) else {
+                return Ok(None);
+            };
+            if term_lhs != lhs
+                || term_rhs != rhs
+                || index != i64::try_from(offset + 1).unwrap_or(i64::MAX)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(serde_json::json!({
+            "kind": "dot",
+            "lhs": self.reference_context(&lhs)?,
+            "rhs": self.reference_context(&rhs)?,
+            "dimensions": [length],
+            "element_count": length,
+        })))
     }
 
     fn indexed_expression(
@@ -514,6 +646,86 @@ impl<'a> CContextLowerer<'a> {
     }
 }
 
+fn single_part_name(reference: &Reference) -> Option<&Name> {
+    let Reference::State(parts) = reference else {
+        return None;
+    };
+    let [part] = parts.as_slice() else {
+        return None;
+    };
+    Some(&part.name)
+}
+
+/// Collect an addition chain only when it has the exact left-fold shape that
+/// the generated helper loop evaluates. Accepting a right-nested addition
+/// would silently reassociate floating-point operations.
+fn collect_left_associated_add_terms<'a>(
+    expression: &'a Expression,
+    terms: &mut Vec<&'a Expression>,
+) -> bool {
+    match unparen(expression) {
+        Expression::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } => {
+            if matches!(
+                unparen(rhs),
+                Expression::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            ) || !collect_left_associated_add_terms(lhs, terms)
+            {
+                return false;
+            }
+            terms.push(unparen(rhs));
+            true
+        }
+        term => {
+            terms.push(term);
+            true
+        }
+    }
+}
+
+fn dot_term(expression: &Expression) -> Option<(Reference, Reference, i64)> {
+    let Expression::Binary {
+        op: BinaryOp::Mul,
+        lhs,
+        rhs,
+    } = unparen(expression)
+    else {
+        return None;
+    };
+    let (lhs, lhs_index) = indexed_vector_reference(unparen(lhs))?;
+    let (rhs, rhs_index) = indexed_vector_reference(unparen(rhs))?;
+    (lhs_index == rhs_index).then_some((lhs, rhs, lhs_index))
+}
+
+fn indexed_vector_reference(expression: &Expression) -> Option<(Reference, i64)> {
+    let Expression::Ref(Reference::State(parts)) = expression else {
+        return None;
+    };
+    let [part] = parts.as_slice() else {
+        return None;
+    };
+    let [Expression::Integer(index)] = part.subscripts.as_slice() else {
+        return None;
+    };
+    let mut whole = part.clone();
+    whole.subscripts.clear();
+    Some((Reference::State(vec![whole]), *index))
+}
+
+fn unparen(expression: &Expression) -> &Expression {
+    if let Expression::Paren(inner) = expression {
+        unparen(inner)
+    } else {
+        expression
+    }
+}
+
 /// GALEC Integer is C `int32_t`: literals outside its range are rejected,
 /// never truncated (SPEC_0008).
 fn validate_integer_literal(value: i64) -> Result<(), GalecTargetError> {
@@ -557,13 +769,39 @@ fn unsupported_statement(construct: &'static str) -> GalecTargetError {
 mod tests {
     use rumoca_core::Span;
     use rumoca_ir_galec::ast::{
-        Block, Condition, Dimension, Expression, IfBranch, IfExpression, IfStatement, Name,
-        ProtectedEntity, ProtectedKind, RangeAttributes, RefPart, Reference, ScalarType, Spanned,
-        Statement, TypeRef, VariableDeclaration,
+        BinaryOp, Block, Condition, Dimension, Expression, IfBranch, IfExpression, IfStatement,
+        Name, ProtectedEntity, ProtectedKind, RangeAttributes, RefPart, Reference, ScalarType,
+        Spanned, Statement, TypeRef, VariableDeclaration,
     };
 
     use super::CContextLowerer;
     use crate::c_mangle::CNameTable;
+
+    fn real_array(name: &str, dimensions: &[i64]) -> ProtectedEntity {
+        ProtectedEntity {
+            kind: ProtectedKind::State,
+            decl: VariableDeclaration {
+                ty: TypeRef::Primitive(ScalarType::Real),
+                name: Name::ident(name),
+                dimensions: dimensions
+                    .iter()
+                    .copied()
+                    .map(|size| Dimension::Expr(Expression::Integer(size)))
+                    .collect(),
+                range: RangeAttributes::default(),
+                span: Span::DUMMY,
+            },
+            start: None,
+        }
+    }
+
+    fn state_ref(name: &str, index: Option<i64>) -> Reference {
+        Reference::State(vec![RefPart {
+            name: Name::ident(name),
+            subscripts: index.into_iter().map(Expression::Integer).collect(),
+            span: Span::DUMMY,
+        }])
+    }
 
     #[test]
     fn array_literal_expansion_preserves_existing_target_subscripts() {
@@ -652,5 +890,97 @@ mod tests {
         assert_eq!(contexts[0]["branches"][0]["body"][0]["kind"], "assign");
         assert_eq!(contexts[0]["branches"][0]["body"][0]["value"]["kind"], "if");
         assert_eq!(contexts[0]["else_body"][0]["kind"], "assign");
+    }
+
+    #[test]
+    fn whole_array_arithmetic_becomes_one_typed_helper_call() {
+        let mut block = Block::new(Name::ident("ArrayHelper"));
+        block.protected = vec![
+            real_array("input", &[3]),
+            real_array("output", &[3]),
+            ProtectedEntity {
+                kind: ProtectedKind::State,
+                decl: VariableDeclaration::scalar(ScalarType::Real, Name::ident("scale")),
+                start: None,
+            },
+        ];
+        let names = CNameTable::build(&block).expect("build C names");
+        let statement = Statement::Assignment {
+            target: state_ref("output", None),
+            value: Expression::Binary {
+                op: BinaryOp::Div,
+                lhs: Box::new(Expression::Ref(state_ref("input", None))),
+                rhs: Box::new(Expression::Ref(state_ref("scale", None))),
+            },
+        };
+
+        let contexts = CContextLowerer::new(&names)
+            .statement_contexts(&statement)
+            .expect("lower array helper");
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["kind"], "array_binary");
+        assert_eq!(contexts[0]["operator"], "div");
+        assert_eq!(contexts[0]["lhs"]["kind"], "array");
+        assert_eq!(contexts[0]["rhs"]["kind"], "scalar");
+        assert_eq!(contexts[0]["element_count"], 3);
+    }
+
+    #[test]
+    fn complete_expanded_sum_of_products_becomes_dot_context() {
+        let mut block = Block::new(Name::ident("DotHelper"));
+        block.protected = vec![
+            real_array("a", &[3]),
+            real_array("b", &[3]),
+            ProtectedEntity {
+                kind: ProtectedKind::State,
+                decl: VariableDeclaration::scalar(ScalarType::Real, Name::ident("result")),
+                start: None,
+            },
+        ];
+        let product = |index| Expression::Binary {
+            op: BinaryOp::Mul,
+            lhs: Box::new(Expression::Ref(state_ref("a", Some(index)))),
+            rhs: Box::new(Expression::Ref(state_ref("b", Some(index)))),
+        };
+        let value = Expression::Binary {
+            op: BinaryOp::Add,
+            lhs: Box::new(Expression::Binary {
+                op: BinaryOp::Add,
+                lhs: Box::new(product(1)),
+                rhs: Box::new(product(2)),
+            }),
+            rhs: Box::new(product(3)),
+        };
+        let names = CNameTable::build(&block).expect("build C names");
+        let contexts = CContextLowerer::new(&names)
+            .statement_contexts(&Statement::Assignment {
+                target: state_ref("result", None),
+                value,
+            })
+            .expect("lower dot helper");
+
+        assert_eq!(contexts[0]["value"]["kind"], "dot");
+        assert_eq!(contexts[0]["value"]["lhs"]["name"], "a");
+        assert_eq!(contexts[0]["value"]["rhs"]["name"], "b");
+        assert_eq!(contexts[0]["value"]["element_count"], 3);
+
+        let right_associated = Expression::Binary {
+            op: BinaryOp::Add,
+            lhs: Box::new(product(1)),
+            rhs: Box::new(Expression::Binary {
+                op: BinaryOp::Add,
+                lhs: Box::new(product(2)),
+                rhs: Box::new(product(3)),
+            }),
+        };
+        let contexts = CContextLowerer::new(&names)
+            .statement_contexts(&Statement::Assignment {
+                target: state_ref("result", None),
+                value: right_associated,
+            })
+            .expect("preserve right-associated sum");
+
+        assert_eq!(contexts[0]["value"]["kind"], "binary");
     }
 }

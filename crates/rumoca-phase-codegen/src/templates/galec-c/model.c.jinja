@@ -1,6 +1,9 @@
 {%- macro reference(value) -%}
 self->{{ value.name }}{%- for index in value.indices -%}[{% if index.kind == "literal" %}{{ index.value }}{% else %}({{ expr(index.value) }} - 1){% endif %}]{%- endfor -%}
 {%- endmacro -%}
+{%- macro flat_reference(value, dimensions) -%}
+&{{ reference(value) }}{%- for _ in dimensions -%}[0]{%- endfor -%}
+{%- endmacro -%}
 {%- macro binary_operator(kind) -%}
 {%- if kind == "mul" -%}*{%- elif kind == "div" -%}/{%- elif kind == "add" -%}+{%- elif kind == "sub" -%}-{%- elif kind == "lt" -%}<{%- elif kind == "gt" -%}>{%- elif kind == "le" -%}<={%- elif kind == "ge" -%}>={%- elif kind == "eq" -%}=={%- elif kind == "ne" -%}!={%- elif kind == "and" -%}&&{%- elif kind == "or" -%}||{%- endif -%}
 {%- endmacro -%}
@@ -36,7 +39,14 @@ self->{{ value.name }}{%- for index in value.indices -%}[{% if index.kind == "li
 {%- elif value.kind == "neg" -%}(-{{ reference(value.reference) }})
 {%- elif value.kind == "not" -%}(!({{ expr(value.value) }}))
 {%- elif value.kind == "binary" -%}{% if value.operator == "pow" %}pow({{ expr(value.lhs) }}, {{ expr(value.rhs) }}){% else %}({{ expr(value.lhs) }} {{ binary_operator(value.operator) }} {{ expr(value.rhs) }}){% endif %}
+{%- elif value.kind == "dot" -%}rumoca_array_dot({{ flat_reference(value.lhs, value.dimensions) }}, {{ flat_reference(value.rhs, value.dimensions) }}, {{ value.element_count }})
 {%- endif -%}
+{%- endmacro -%}
+{%- macro array_operand(value, dimensions) -%}
+{%- if value.kind == "array" -%}{{ flat_reference(value.reference, dimensions) }}{%- else -%}{{ expr(value.value) }}{%- endif -%}
+{%- endmacro -%}
+{%- macro array_binary_function(value) -%}
+rumoca_array_{{ value.operator }}_{{ "a" if value.lhs.kind == "array" else "s" }}{{ "a" if value.rhs.kind == "array" else "s" }}
 {%- endmacro -%}
 {%- macro padding(depth) -%}
 {%- for _ in range(depth) %}    {% endfor -%}
@@ -46,6 +56,8 @@ self->{{ value.name }}{%- for index in value.indices -%}[{% if index.kind == "li
 {{ padding(depth) }}memcpy({{ reference(value.target) }}, {{ reference(value.source) }}, sizeof({{ reference(value.target) }}));
 {%- elif value.kind == "assign" -%}
 {{ padding(depth) }}{{ reference(value.target) }} = {{ expr(value.value) }};
+{%- elif value.kind == "array_binary" -%}
+{{ padding(depth) }}{{ array_binary_function(value) }}({{ flat_reference(value.target, value.dimensions) }}, {{ array_operand(value.lhs, value.dimensions) }}, {{ array_operand(value.rhs, value.dimensions) }}, {{ value.element_count }});
 {%- elif value.kind == "if" -%}
 {%- for branch in value.branches %}
 {{ padding(depth) }}{% if loop.first %}if{% else %}else if{% endif %} ({{ expr(branch.condition) }}) {
@@ -69,6 +81,7 @@ self->{{ value.name }}{%- for index in value.indices -%}[{% if index.kind == "li
 #include "{{ model_name }}.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h> /* memcpy, for whole-array state copies */
 
 /* A model uses only some of the fixed helper prelude below. `static inline`
@@ -100,6 +113,62 @@ RUMOCA_MAYBE_UNUSED static inline int32_t rumoca_ir_galec_imin(int32_t u1, int32
 }
 RUMOCA_MAYBE_UNUSED static inline int32_t rumoca_ir_galec_imax(int32_t u1, int32_t u2) {
     return u1 > u2 ? u1 : u2;
+}
+RUMOCA_MAYBE_UNUSED static inline double rumoca_array_dot(
+    const double *lhs, const double *rhs, size_t count) {
+    double result = lhs[0] * rhs[0];
+    for (size_t i = 1; i < count; ++i) {
+        result += lhs[i] * rhs[i];
+    }
+    return result;
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_add_aa(
+    double *out, const double *lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] + rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_sub_aa(
+    double *out, const double *lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] - rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_mul_aa(
+    double *out, const double *lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] * rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_div_aa(
+    double *out, const double *lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] / rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_add_as(
+    double *out, const double *lhs, double rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] + rhs;
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_sub_as(
+    double *out, const double *lhs, double rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] - rhs;
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_mul_as(
+    double *out, const double *lhs, double rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] * rhs;
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_div_as(
+    double *out, const double *lhs, double rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs[i] / rhs;
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_add_sa(
+    double *out, double lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs + rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_sub_sa(
+    double *out, double lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs - rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_mul_sa(
+    double *out, double lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs * rhs[i];
+}
+RUMOCA_MAYBE_UNUSED static inline void rumoca_array_div_sa(
+    double *out, double lhs, const double *rhs, size_t count) {
+    for (size_t i = 0; i < count; ++i) out[i] = lhs / rhs[i];
 }
 
 void {{ function_prefix }}_startup({{ struct_name }} *self) {

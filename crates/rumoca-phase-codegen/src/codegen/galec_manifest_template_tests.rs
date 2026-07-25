@@ -81,6 +81,27 @@ fn galec_c_template_renders_statement_if_as_blocks_and_expression_if_as_ternary(
                     "target": reference("x"),
                     "value": {"kind": "real", "literal": "0.0", "negative": false}
                 }]
+            }, {
+                "kind": "array_binary",
+                "operator": "div",
+                "target": reference("normalized"),
+                "dimensions": [3],
+                "element_count": 3,
+                "lhs": {"kind": "array", "reference": reference("sample")},
+                "rhs": {
+                    "kind": "scalar",
+                    "value": {"kind": "ref", "reference": reference("norm")}
+                }
+            }, {
+                "kind": "assign",
+                "target": reference("norm_squared"),
+                "value": {
+                    "kind": "dot",
+                    "lhs": reference("sample"),
+                    "rhs": reference("sample"),
+                    "dimensions": [3],
+                    "element_count": 3
+                }
             }]
         }
     });
@@ -98,6 +119,18 @@ fn galec_c_template_renders_statement_if_as_blocks_and_expression_if_as_ternary(
         "{rendered}"
     );
     assert!(rendered.contains("else {"), "{rendered}");
+    assert!(
+        rendered.contains(
+            "rumoca_array_div_as(&self->normalized[0], &self->sample[0], self->norm, 3);"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "self->norm_squared = rumoca_array_dot(&self->sample[0], &self->sample[0], 3);"
+        ),
+        "{rendered}"
+    );
 }
 
 #[test]

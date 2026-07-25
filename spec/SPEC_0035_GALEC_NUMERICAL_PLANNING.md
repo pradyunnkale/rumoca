@@ -71,6 +71,12 @@ constructors, and `solveLinearEquations`. Initial triangularity inference and
 linear-solve planning are implemented. Full GALEC statement/expression
 coverage and production routing remain implementation gaps.
 
+The initial embedded C lowering also selects helper-backed representations for
+basic `Real` array arithmetic. This is a typed codegen selection at the GALEC
+to C-context boundary; routing the general `NumericalPlan` through production
+codegen remains future work. Rust supplies structured `array_binary` and `dot`
+context data, while the Jinja template owns helper definitions and C syntax.
+
 ### Fact Ownership
 
 | Rule | Owner/Where | Brief Justification |
@@ -143,7 +149,8 @@ positive-definiteness inference is implemented.
 | Rank greater than two | Not planned initially | Target-specific diagnostic |
 | Primitive GALEC scalar types | Required | — |
 | State-compartment values | Not planned initially | Target-specific diagnostic |
-| Array add/subtract/multiply/divide | Element-wise/broadcast per GALEC | Existing generic emission |
+| Array add/subtract/multiply/divide | Typed static C helpers for whole `Real` arrays and scalar broadcast | Existing scalar-expanded emission for expressions outside the helper pattern |
+| Dot product | Complete ordered left-associated sum of pairwise products over equally-sized `Real` vectors | Preserve the original scalar expression |
 | Linear solve | Required for EKF | Pivoted general fallback |
 | Matrix product/transpose recognition | Deferred until a valid GALEC loop/function pattern exists | Existing generic emission |
 | Sparse kernels | Deferred | Dense fallback |
@@ -179,6 +186,9 @@ never defaulted.
 | Invalid dimension, rank, component, and compartment cases return stable codes | Diagnostics |
 | `x := solveLinearEquations(S, residual)` produces solve then assignment in `DoStep` | Operation analysis |
 | Array `*` is never mislabeled as matrix multiplication | GALEC semantic preservation |
+| Whole-array element-wise arithmetic and scalar broadcasts render typed helper calls | Readable helper-backed C |
+| A complete ordered left-associated vector sum-of-products renders a dot helper | Safe dot recovery |
+| Partial, reordered, or right-associated sum-of-products remains scalar C | Evaluation-order preservation |
 | A fixed lower-triangular matrix proves lower true, upper false, and invertible true | Triangularity inference |
 | Proven lower/upper triangular solves choose forward/backward substitution | Specialized planning |
 | An unknown matrix chooses the generic pivoted solve | Sound fallback |
