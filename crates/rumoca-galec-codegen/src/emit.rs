@@ -757,11 +757,7 @@ fn statements(
     block_statements: &[Spanned<Statement>],
     lowerer: &crate::c_lower::CContextLowerer<'_>,
 ) -> Result<Vec<serde_json::Value>, GalecTargetError> {
-    block_statements
-        .iter()
-        .map(|statement| lowerer.statement_contexts(&statement.node))
-        .collect::<Result<Vec<_>, _>>()
-        .map(|groups| groups.into_iter().flatten().collect())
+    lowerer.statements_contexts(block_statements)
 }
 
 /// Make traceability text safe inside a C block comment by breaking both the

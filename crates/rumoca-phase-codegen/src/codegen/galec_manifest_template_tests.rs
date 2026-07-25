@@ -102,6 +102,27 @@ fn galec_c_template_renders_statement_if_as_blocks_and_expression_if_as_ternary(
                     "dimensions": [3],
                     "element_count": 3
                 }
+            }, {
+                "kind": "quat_gravity",
+                "target": reference("gravity"),
+                "quaternion": reference("quaternion"),
+                "target_dimensions": [3],
+                "quaternion_dimensions": [4]
+            }, {
+                "kind": "cross3",
+                "target": reference("error"),
+                "lhs": reference("accel"),
+                "rhs": reference("gravity"),
+                "dimensions": [3]
+            }, {
+                "kind": "quat_integrate",
+                "target": reference("next_quaternion"),
+                "quaternion": reference("quaternion"),
+                "angular_rate": reference("gyro"),
+                "sample_period": {"kind": "ref", "reference": reference("dt")},
+                "target_dimensions": [4],
+                "quaternion_dimensions": [4],
+                "angular_rate_dimensions": [3]
             }]
         }
     });
@@ -128,6 +149,20 @@ fn galec_c_template_renders_statement_if_as_blocks_and_expression_if_as_ternary(
     assert!(
         rendered.contains(
             "self->norm_squared = rumoca_array_dot(&self->sample[0], &self->sample[0], 3);"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("rumoca_quat_gravity(&self->gravity[0], &self->quaternion[0]);"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("rumoca_cross3(&self->error[0], &self->accel[0], &self->gravity[0]);"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "rumoca_quat_integrate(&self->next_quaternion[0], &self->quaternion[0], &self->gyro[0], self->dt);"
         ),
         "{rendered}"
     );

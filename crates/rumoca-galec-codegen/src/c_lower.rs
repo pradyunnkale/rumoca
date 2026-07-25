@@ -68,6 +68,32 @@ impl<'a> CContextLowerer<'a> {
         }
     }
 
+    /// Lower an ordered GALEC statement block.
+    ///
+    /// Complete multi-assignment numerical idioms are recognized here,
+    /// before their component assignments lose their shared operation
+    /// structure. An incomplete or non-exact pattern falls back to ordinary
+    /// statement lowering without changing its evaluation order.
+    pub fn statements_contexts(
+        &self,
+        statements: &[Spanned<Statement>],
+    ) -> Result<Vec<serde_json::Value>, GalecTargetError> {
+        let mut contexts = Vec::new();
+        let mut index = 0;
+        while index < statements.len() {
+            if let Some((context, consumed)) =
+                self.multi_assignment_helper_context(&statements[index..])?
+            {
+                contexts.push(context);
+                index += consumed;
+            } else {
+                contexts.extend(self.statement_contexts(&statements[index].node)?);
+                index += 1;
+            }
+        }
+        Ok(contexts)
+    }
+
     fn if_statement_context(
         &self,
         statement: &rumoca_ir_galec::ast::IfStatement,
@@ -103,11 +129,7 @@ impl<'a> CContextLowerer<'a> {
         &self,
         statements: &[Spanned<Statement>],
     ) -> Result<Vec<serde_json::Value>, GalecTargetError> {
-        statements
-            .iter()
-            .map(|statement| self.statement_contexts(&statement.node))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|groups| groups.into_iter().flatten().collect())
+        self.statements_contexts(statements)
     }
 
     fn assignment_contexts(
@@ -353,6 +375,217 @@ impl<'a> CContextLowerer<'a> {
                 });
             }
         })
+    }
+
+    fn multi_assignment_helper_context(
+        &self,
+        statements: &[Spanned<Statement>],
+    ) -> Result<Option<(serde_json::Value, usize)>, GalecTargetError> {
+        if let Some(context) = self.quaternion_integrate_context(statements)? {
+            return Ok(Some((context, 4)));
+        }
+        if let Some(context) = self.quaternion_gravity_context(statements)? {
+            return Ok(Some((context, 3)));
+        }
+        if let Some(context) = self.cross3_context(statements)? {
+            return Ok(Some((context, 3)));
+        }
+        Ok(None)
+    }
+
+    fn cross3_context(
+        &self,
+        statements: &[Spanned<Statement>],
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Some((target, values)) = component_assignment_group(statements, 3) else {
+            return Ok(None);
+        };
+        if !self.is_real_vector(&target, 3) {
+            return Ok(None);
+        }
+        let Expression::Binary {
+            op: BinaryOp::Sub,
+            lhs,
+            ..
+        } = unparen(values[0])
+        else {
+            return Ok(None);
+        };
+        let Expression::Binary {
+            op: BinaryOp::Mul,
+            lhs,
+            rhs,
+        } = unparen(lhs)
+        else {
+            return Ok(None);
+        };
+        let Some((a, 2)) = indexed_vector_reference(unparen(lhs)) else {
+            return Ok(None);
+        };
+        let Some((b, 3)) = indexed_vector_reference(unparen(rhs)) else {
+            return Ok(None);
+        };
+        if !self.is_real_vector(&a, 3) || !self.is_real_vector(&b, 3) {
+            return Ok(None);
+        }
+        let expected = [
+            sub(
+                mul(element(&a, 2), element(&b, 3)),
+                mul(element(&a, 3), element(&b, 2)),
+            ),
+            sub(
+                mul(element(&a, 3), element(&b, 1)),
+                mul(element(&a, 1), element(&b, 3)),
+            ),
+            sub(
+                mul(element(&a, 1), element(&b, 2)),
+                mul(element(&a, 2), element(&b, 1)),
+            ),
+        ];
+        if !values
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| expressions_match(actual, expected))
+        {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::json!({
+            "kind": "cross3",
+            "target": self.reference_context(&target)?,
+            "lhs": self.reference_context(&a)?,
+            "rhs": self.reference_context(&b)?,
+            "dimensions": [3],
+        })))
+    }
+
+    fn quaternion_gravity_context(
+        &self,
+        statements: &[Spanned<Statement>],
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Some((target, values)) = component_assignment_group(statements, 3) else {
+            return Ok(None);
+        };
+        if !self.is_real_vector(&target, 3) {
+            return Ok(None);
+        }
+        let Some(quaternion) = first_indexed_real_vector(values[0], self.names, 4) else {
+            return Ok(None);
+        };
+        let q = |index| element(&quaternion, index);
+        let expected = [
+            mul(Expression::Real(2.0), sub(mul(q(2), q(4)), mul(q(1), q(3)))),
+            mul(Expression::Real(2.0), add(mul(q(1), q(2)), mul(q(3), q(4)))),
+            add(
+                sub(sub(mul(q(1), q(1)), mul(q(2), q(2))), mul(q(3), q(3))),
+                mul(q(4), q(4)),
+            ),
+        ];
+        if !values
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| expressions_match(actual, expected))
+        {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::json!({
+            "kind": "quat_gravity",
+            "target": self.reference_context(&target)?,
+            "quaternion": self.reference_context(&quaternion)?,
+            "target_dimensions": [3],
+            "quaternion_dimensions": [4],
+        })))
+    }
+
+    fn quaternion_integrate_context(
+        &self,
+        statements: &[Spanned<Statement>],
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Some((target, values)) = component_assignment_group(statements, 4) else {
+            return Ok(None);
+        };
+        if !self.is_real_vector(&target, 4) {
+            return Ok(None);
+        }
+        let Expression::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } = unparen(values[0])
+        else {
+            return Ok(None);
+        };
+        let Some((quaternion, 1)) = indexed_vector_reference(unparen(lhs)) else {
+            return Ok(None);
+        };
+        if !self.is_real_vector(&quaternion, 4) {
+            return Ok(None);
+        }
+        let Expression::Binary {
+            op: BinaryOp::Mul,
+            lhs: scaled_rate,
+            rhs: sample_period,
+        } = unparen(rhs)
+        else {
+            return Ok(None);
+        };
+        if self.expression_needs_indexing(sample_period) {
+            return Ok(None);
+        }
+        let Some(angular_rate) = first_indexed_real_vector(scaled_rate, self.names, 3) else {
+            return Ok(None);
+        };
+
+        let q = |index| element(&quaternion, index);
+        let w = |index| element(&angular_rate, index);
+        let half = Expression::Real(0.5);
+        let zero = Expression::Real(0.0);
+        let scaled = |value| mul(mul(half.clone(), value), unparen(sample_period).clone());
+        let expected = [
+            add(
+                q(1),
+                scaled(sub(
+                    sub(sub(zero, mul(q(2), w(1))), mul(q(3), w(2))),
+                    mul(q(4), w(3)),
+                )),
+            ),
+            add(
+                q(2),
+                scaled(sub(add(mul(q(1), w(1)), mul(q(3), w(3))), mul(q(4), w(2)))),
+            ),
+            add(
+                q(3),
+                scaled(add(sub(mul(q(1), w(2)), mul(q(2), w(3))), mul(q(4), w(1)))),
+            ),
+            add(
+                q(4),
+                scaled(sub(add(mul(q(1), w(3)), mul(q(2), w(2))), mul(q(3), w(1)))),
+            ),
+        ];
+        if !values
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| expressions_match(actual, expected))
+        {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::json!({
+            "kind": "quat_integrate",
+            "target": self.reference_context(&target)?,
+            "quaternion": self.reference_context(&quaternion)?,
+            "angular_rate": self.reference_context(&angular_rate)?,
+            "sample_period": self.expression_context(sample_period)?,
+            "target_dimensions": [4],
+            "quaternion_dimensions": [4],
+            "angular_rate_dimensions": [3],
+        })))
+    }
+
+    fn is_real_vector(&self, reference: &Reference, length: i64) -> bool {
+        let Some(name) = single_part_name(reference) else {
+            return false;
+        };
+        self.names.scalar_type(name) == Some(rumoca_ir_galec::ast::ScalarType::Real)
+            && self.names.array_dimensions(name) == Some([length].as_slice())
     }
 
     fn simple_array_binary_context(
@@ -656,6 +889,127 @@ fn single_part_name(reference: &Reference) -> Option<&Name> {
     Some(&part.name)
 }
 
+fn component_assignment_group<'a>(
+    statements: &'a [Spanned<Statement>],
+    count: usize,
+) -> Option<(Reference, Vec<&'a Expression>)> {
+    let selected = statements.get(..count)?;
+    let mut target = None;
+    let mut values = Vec::with_capacity(count);
+    for (offset, statement) in selected.iter().enumerate() {
+        let Statement::Assignment {
+            target: indexed_target,
+            value,
+        } = &statement.node
+        else {
+            return None;
+        };
+        let (whole_target, index) =
+            indexed_vector_reference(&Expression::Ref(indexed_target.clone()))?;
+        if index != i64::try_from(offset + 1).ok()? {
+            return None;
+        }
+        match &target {
+            Some(existing) if existing != &whole_target => return None,
+            None => target = Some(whole_target),
+            _ => {}
+        }
+        values.push(value);
+    }
+    Some((target?, values))
+}
+
+fn first_indexed_real_vector(
+    expression: &Expression,
+    names: &CNameTable,
+    length: i64,
+) -> Option<Reference> {
+    match unparen(expression) {
+        Expression::Ref(_) => {
+            let (reference, _) = indexed_vector_reference(unparen(expression))?;
+            let name = single_part_name(&reference)?;
+            (names.scalar_type(name) == Some(rumoca_ir_galec::ast::ScalarType::Real)
+                && names.array_dimensions(name) == Some([length].as_slice()))
+            .then_some(reference)
+        }
+        Expression::Neg(reference) => {
+            let (reference, _) = indexed_vector_reference(&Expression::Ref(reference.clone()))?;
+            let name = single_part_name(&reference)?;
+            (names.scalar_type(name) == Some(rumoca_ir_galec::ast::ScalarType::Real)
+                && names.array_dimensions(name) == Some([length].as_slice()))
+            .then_some(reference)
+        }
+        Expression::Binary { lhs, rhs, .. } => first_indexed_real_vector(lhs, names, length)
+            .or_else(|| first_indexed_real_vector(rhs, names, length)),
+        Expression::Paren(inner) | Expression::Not(inner) => {
+            first_indexed_real_vector(inner, names, length)
+        }
+        Expression::If(if_expression) => if_expression
+            .branches
+            .iter()
+            .find_map(|(condition, value)| {
+                first_indexed_real_vector(condition, names, length)
+                    .or_else(|| first_indexed_real_vector(value, names, length))
+            })
+            .or_else(|| first_indexed_real_vector(&if_expression.else_value, names, length)),
+        Expression::Call(call) => call
+            .arguments
+            .iter()
+            .find_map(|argument| first_indexed_real_vector(argument, names, length)),
+        Expression::Array(elements) => elements
+            .iter()
+            .find_map(|element| first_indexed_real_vector(element, names, length)),
+        Expression::Size { dimension, .. } => first_indexed_real_vector(dimension, names, length),
+        Expression::Bool(_) | Expression::Integer(_) | Expression::Real(_) => None,
+    }
+}
+
+fn element(reference: &Reference, index: i64) -> Expression {
+    let Reference::State(parts) = reference else {
+        unreachable!("helper pattern references are state references");
+    };
+    let mut part = parts[0].clone();
+    part.subscripts.push(Expression::Integer(index));
+    Expression::Ref(Reference::State(vec![part]))
+}
+
+fn add(lhs: Expression, rhs: Expression) -> Expression {
+    Expression::binary(BinaryOp::Add, lhs, rhs)
+}
+
+fn sub(lhs: Expression, rhs: Expression) -> Expression {
+    Expression::binary(BinaryOp::Sub, lhs, rhs)
+}
+
+fn mul(lhs: Expression, rhs: Expression) -> Expression {
+    Expression::binary(BinaryOp::Mul, lhs, rhs)
+}
+
+fn expressions_match(actual: &Expression, expected: &Expression) -> bool {
+    match (unparen(actual), unparen(expected)) {
+        (
+            Expression::Binary {
+                op: actual_op,
+                lhs: actual_lhs,
+                rhs: actual_rhs,
+            },
+            Expression::Binary {
+                op: expected_op,
+                lhs: expected_lhs,
+                rhs: expected_rhs,
+            },
+        ) => {
+            actual_op == expected_op
+                && expressions_match(actual_lhs, expected_lhs)
+                && expressions_match(actual_rhs, expected_rhs)
+        }
+        (Expression::Real(actual), Expression::Real(expected)) => {
+            actual.to_bits() == expected.to_bits()
+        }
+        (actual, expected) => actual == expected,
+    }
+}
+
 /// Collect an addition chain only when it has the exact left-fold shape that
 /// the generated helper loop evaluates. Accepting a right-nested addition
 /// would silently reassociate floating-point operations.
@@ -774,7 +1128,7 @@ mod tests {
         Spanned, Statement, TypeRef, VariableDeclaration,
     };
 
-    use super::CContextLowerer;
+    use super::{CContextLowerer, element, mul, sub};
     use crate::c_mangle::CNameTable;
 
     fn real_array(name: &str, dimensions: &[i64]) -> ProtectedEntity {
@@ -982,5 +1336,57 @@ mod tests {
             .expect("preserve right-associated sum");
 
         assert_eq!(contexts[0]["value"]["kind"], "binary");
+    }
+
+    #[test]
+    fn complete_cross_product_component_group_becomes_one_helper_context() {
+        let mut block = Block::new(Name::ident("CrossHelper"));
+        block.protected = vec![
+            real_array("a", &[3]),
+            real_array("b", &[3]),
+            real_array("result", &[3]),
+        ];
+        let a = state_ref("a", None);
+        let b = state_ref("b", None);
+        let values = [
+            sub(
+                mul(element(&a, 2), element(&b, 3)),
+                mul(element(&a, 3), element(&b, 2)),
+            ),
+            sub(
+                mul(element(&a, 3), element(&b, 1)),
+                mul(element(&a, 1), element(&b, 3)),
+            ),
+            sub(
+                mul(element(&a, 1), element(&b, 2)),
+                mul(element(&a, 2), element(&b, 1)),
+            ),
+        ];
+        let statements = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                Spanned::dummy(Statement::Assignment {
+                    target: state_ref("result", Some(i64::try_from(index + 1).unwrap())),
+                    value,
+                })
+            })
+            .collect::<Vec<_>>();
+        let names = CNameTable::build(&block).expect("build C names");
+        let lowerer = CContextLowerer::new(&names);
+
+        let contexts = lowerer
+            .statements_contexts(&statements)
+            .expect("lower complete cross product");
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["kind"], "cross3");
+        assert_eq!(contexts[0]["lhs"]["name"], "a");
+        assert_eq!(contexts[0]["rhs"]["name"], "b");
+
+        let incomplete = lowerer
+            .statements_contexts(&statements[..2])
+            .expect("preserve incomplete cross product");
+        assert_eq!(incomplete.len(), 2);
+        assert!(incomplete.iter().all(|context| context["kind"] == "assign"));
     }
 }

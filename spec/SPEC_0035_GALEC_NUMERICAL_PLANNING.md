@@ -151,6 +151,9 @@ positive-definiteness inference is implemented.
 | State-compartment values | Not planned initially | Target-specific diagnostic |
 | Array add/subtract/multiply/divide | Typed static C helpers for whole `Real` arrays and scalar broadcast | Existing scalar-expanded emission for expressions outside the helper pattern |
 | Dot product | Complete ordered left-associated sum of pairwise products over equally-sized `Real` vectors | Preserve the original scalar expression |
+| 3D cross product | Complete ordered three-component determinant pattern | Preserve the original component assignments |
+| Quaternion gravity rotation | Complete ordered three-component unit-axis rotation pattern | Preserve the original component assignments |
+| Quaternion angular-rate integration | Complete ordered four-component first-order integration pattern | Preserve the original component assignments |
 | Linear solve | Required for EKF | Pivoted general fallback |
 | Matrix product/transpose recognition | Deferred until a valid GALEC loop/function pattern exists | Existing generic emission |
 | Sparse kernels | Deferred | Dense fallback |
@@ -189,6 +192,8 @@ never defaulted.
 | Whole-array element-wise arithmetic and scalar broadcasts render typed helper calls | Readable helper-backed C |
 | A complete ordered left-associated vector sum-of-products renders a dot helper | Safe dot recovery |
 | Partial, reordered, or right-associated sum-of-products remains scalar C | Evaluation-order preservation |
+| Complete cross-product and quaternion component groups render one typed helper call | Recover operations scalarized before C lowering |
+| Incomplete or modified component groups remain scalar C | Never guess a higher-level operation |
 | A fixed lower-triangular matrix proves lower true, upper false, and invertible true | Triangularity inference |
 | Proven lower/upper triangular solves choose forward/backward substitution | Specialized planning |
 | An unknown matrix chooses the generic pivoted solve | Sound fallback |
