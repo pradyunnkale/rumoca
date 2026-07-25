@@ -66,9 +66,10 @@ pub(super) fn analyze(
 ```
 
 The initial declaration and operation pass is implemented for direct
-assignments, arithmetic expressions, and `solveLinearEquations`. Property
-inference, full GALEC statement/expression coverage, `NumericalPlan`, and
-production routing remain implementation gaps.
+assignments, arithmetic expressions, fixed rank-one/rank-two array
+constructors, and `solveLinearEquations`. Initial triangularity inference and
+linear-solve planning are implemented. Full GALEC statement/expression
+coverage and production routing remain implementation gaps.
 
 ### Fact Ownership
 
@@ -96,6 +97,19 @@ Boolean predicates use `ProofStatus::{ProvenTrue, ProvenFalse, Unknown}`.
 Branch joins retain only facts proven on every reachable path. Loops use their
 statically bounded GALEC semantics; analysis must not guess a fixed point.
 
+For a fixed, square matrix constructor:
+
+- upper triangular is `ProvenTrue` only when every entry below the diagonal is
+  proven zero, and `ProvenFalse` when any such entry is proven nonzero;
+- lower triangular uses the corresponding entries above the diagonal;
+- triangular invertibility is `ProvenTrue` only when triangularity and every
+  diagonal entry being nonzero are both proven;
+- any missing element proof produces `Unknown`, not a guessed result.
+
+Assignments preserve the input value's facts. Exact zero/nonzero
+classification of a finite source literal is a compile-time structural fact,
+not a runtime tolerance test.
+
 ### Numerical Planning Contract
 
 | Rule | Owner/Where | Brief Justification |
@@ -106,15 +120,20 @@ statically bounded GALEC semantics; analysis must not guess a fixed point.
 | General dense implementations are mandatory fallbacks | numerical library | Unknown facts remain executable |
 | Kernel names are plan data, not emitted source strings | plan + template context | Keep rendering template-owned |
 
-The first planner rule is:
+The initial planner rules are:
 
-| Operation | Required facts | Selected implementation | Fallback |
-|---|---|---|---|
-| Linear solve | square and positive definite | Cholesky solve | pivoted general solve |
+| Operation | Required facts | Selected implementation |
+|---|---|---|
+| Linear solve | square, invertible, lower and upper triangular | diagonal solve |
+| Linear solve | square, invertible, lower triangular | forward substitution |
+| Linear solve | square, invertible, upper triangular | backward substitution |
+| Linear solve | otherwise | generic pivoted solve |
 
 The planner should prefer a solve over materializing an inverse when the GALEC
 operation permits it. Algebraic rewrites such as Woodbury are outside the first
 milestone because they require stronger equivalence and error-semantics proofs.
+Positive-definite Cholesky selection remains a later rule after
+positive-definiteness inference is implemented.
 
 ### Initial Embedded Profile
 
@@ -160,8 +179,9 @@ never defaulted.
 | Invalid dimension, rank, component, and compartment cases return stable codes | Diagnostics |
 | `x := solveLinearEquations(S, residual)` produces solve then assignment in `DoStep` | Operation analysis |
 | Array `*` is never mislabeled as matrix multiplication | GALEC semantic preservation |
-| Positive-definite solve chooses Cholesky | Specialized planning |
-| Unknown-positive-definite solve chooses the general fallback | Sound fallback |
+| A fixed lower-triangular matrix proves lower true, upper false, and invertible true | Triangularity inference |
+| Proven lower/upper triangular solves choose forward/backward substitution | Specialized planning |
+| An unknown matrix chooses the generic pivoted solve | Sound fallback |
 | Generated C compiles and matches the dense reference result | Backend integration |
 
 ## Rationale

@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 
 use super::{
     diagnostic::NumericalAnalysisError,
-    facts::{EntityId, EntityRole, LiteralValue, NumericalFacts, OperationKind, Shape, ValueId},
+    facts::{
+        EntityId, EntityRole, LiteralValue, NumericalFacts, OperationKind, OperationOutput, Shape,
+        ValueId,
+    },
+    infer,
 };
 use rumoca_core::Span;
 use rumoca_ir_galec::ast::{
@@ -156,13 +160,12 @@ impl Analyzer {
             });
         }
 
+        let input_facts = self.facts.value(input).facts().clone();
         let output = self.facts.add_operation(
             OperationKind::Assign,
             vec![input],
-            target_kind,
-            target_shape,
             phase,
-            Some(target_entity),
+            OperationOutput::assignment(target_kind, target_shape, input_facts, target_entity),
         );
         self.current_values.insert(target_entity, output);
         Ok(())
@@ -180,6 +183,7 @@ impl Analyzer {
             Expression::Real(value) => Ok(self.facts.add_literal(LiteralValue::Real(*value))),
             Expression::Ref(reference) => self.current_value(reference, span),
             Expression::Paren(inner) => self.analyze_expression(inner, phase, span),
+            Expression::Array(elements) => self.analyze_array(elements, phase, span),
             Expression::Binary { op, lhs, rhs } => self.analyze_binary(*op, lhs, rhs, phase, span),
             Expression::Call(call) => self.analyze_call(call, phase, span),
             other => Err(NumericalAnalysisError::UnsupportedExpression {
@@ -187,6 +191,123 @@ impl Analyzer {
                 span,
             }),
         }
+    }
+
+    fn analyze_array(
+        &mut self,
+        elements: &[Expression],
+        phase: BlockMethodKind,
+        span: Span,
+    ) -> Result<ValueId, NumericalAnalysisError> {
+        let Some(first) = elements.first() else {
+            return Err(invalid_operation("array constructor cannot be empty", span));
+        };
+        if matches!(first, Expression::Array(_)) {
+            self.analyze_matrix_constructor(elements, phase, span)
+        } else {
+            self.analyze_vector_constructor(elements, phase, span)
+        }
+    }
+
+    fn analyze_vector_constructor(
+        &mut self,
+        elements: &[Expression],
+        phase: BlockMethodKind,
+        span: Span,
+    ) -> Result<ValueId, NumericalAnalysisError> {
+        let (scalar_kind, inputs) = self.analyze_scalar_elements(elements, phase, span)?;
+        let shape = Shape::new(vec![inputs.len()]);
+        Ok(self.facts.add_operation(
+            OperationKind::ArrayConstruct,
+            inputs,
+            phase,
+            OperationOutput::unknown(scalar_kind, shape),
+        ))
+    }
+
+    fn analyze_matrix_constructor(
+        &mut self,
+        rows: &[Expression],
+        phase: BlockMethodKind,
+        span: Span,
+    ) -> Result<ValueId, NumericalAnalysisError> {
+        let mut scalar_kind = None;
+        let mut columns = None;
+        let mut inputs = Vec::new();
+        for row in rows {
+            let Expression::Array(elements) = row else {
+                return Err(invalid_operation(
+                    "matrix constructor must contain only row constructors",
+                    span,
+                ));
+            };
+            if elements.is_empty() {
+                return Err(invalid_operation(
+                    "matrix constructor rows cannot be empty",
+                    span,
+                ));
+            }
+            if columns.is_some_and(|expected| expected != elements.len()) {
+                return Err(invalid_operation(
+                    "matrix constructor rows must have equal lengths",
+                    span,
+                ));
+            }
+            columns = Some(elements.len());
+
+            let (row_kind, row_inputs) = self.analyze_scalar_elements(elements, phase, span)?;
+            if scalar_kind.is_some_and(|expected| expected != row_kind) {
+                return Err(invalid_operation(
+                    "matrix constructor rows must have the same scalar type",
+                    span,
+                ));
+            }
+            scalar_kind = Some(row_kind);
+            inputs.extend(row_inputs);
+        }
+
+        let columns = columns.expect("non-empty matrix constructor must have a row");
+        let scalar_kind = scalar_kind.expect("non-empty matrix constructor must have a type");
+        let shape = Shape::new(vec![rows.len(), columns]);
+        let value_facts =
+            infer::matrix_constructor_facts(&self.facts, rows.len(), columns, &inputs);
+        Ok(self.facts.add_operation(
+            OperationKind::ArrayConstruct,
+            inputs,
+            phase,
+            OperationOutput::inferred(scalar_kind, shape, value_facts),
+        ))
+    }
+
+    fn analyze_scalar_elements(
+        &mut self,
+        elements: &[Expression],
+        phase: BlockMethodKind,
+        span: Span,
+    ) -> Result<(ScalarType, Vec<ValueId>), NumericalAnalysisError> {
+        let mut scalar_kind = None;
+        let mut values = Vec::with_capacity(elements.len());
+        for element in elements {
+            let value = self.analyze_expression(element, phase, span)?;
+            let analyzed = self.facts.value(value);
+            if analyzed.shape().rank() != 0 {
+                return Err(invalid_operation(
+                    "array constructor elements must be scalar",
+                    span,
+                ));
+            }
+            if scalar_kind.is_some_and(|expected| expected != analyzed.scalar_kind()) {
+                return Err(invalid_operation(
+                    "array constructor elements must have the same scalar type",
+                    span,
+                ));
+            }
+            scalar_kind = Some(analyzed.scalar_kind());
+            values.push(value);
+        }
+
+        let scalar_kind = scalar_kind.expect("validated array constructor must be non-empty");
+        Ok((scalar_kind, values))
     }
 
     fn analyze_binary(
@@ -213,9 +334,12 @@ impl Analyzer {
         let lhs = self.analyze_expression(lhs, phase, span)?;
         let rhs = self.analyze_expression(rhs, phase, span)?;
         let (scalar_kind, shape) = self.binary_result(lhs, rhs, span)?;
-        Ok(self
-            .facts
-            .add_operation(kind, vec![lhs, rhs], scalar_kind, shape, phase, None))
+        Ok(self.facts.add_operation(
+            kind,
+            vec![lhs, rhs],
+            phase,
+            OperationOutput::unknown(scalar_kind, shape),
+        ))
     }
 
     fn binary_result(
@@ -284,10 +408,8 @@ impl Analyzer {
         Ok(self.facts.add_operation(
             OperationKind::LinearSolve,
             vec![matrix, rhs],
-            ScalarType::Real,
-            output_shape,
             phase,
-            None,
+            OperationOutput::unknown(ScalarType::Real, output_shape),
         ))
     }
 
@@ -456,6 +578,13 @@ fn invalid_dimension(
         entity: entity_name.to_owned(),
         dimension,
         reason,
+        span,
+    }
+}
+
+fn invalid_operation(detail: impl Into<String>, span: Span) -> NumericalAnalysisError {
+    NumericalAnalysisError::InvalidOperation {
+        detail: detail.into(),
         span,
     }
 }

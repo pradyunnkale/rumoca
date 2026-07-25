@@ -20,6 +20,7 @@ pub(super) enum EntityRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OperationKind {
     Assign,
+    ArrayConstruct,
     Add,
     Subtract,
     ElementwiseMultiply,
@@ -115,6 +116,52 @@ pub struct Operation {
     inputs: Vec<ValueId>,
     outputs: Vec<ValueId>,
     phase: rumoca_ir_galec::ast::BlockMethodKind,
+}
+
+pub(super) struct OperationOutput {
+    scalar_kind: rumoca_ir_galec::ast::ScalarType,
+    shape: Shape,
+    facts: ValueFacts,
+    stored_in: Option<EntityId>,
+}
+
+impl OperationOutput {
+    pub(super) fn unknown(scalar_kind: rumoca_ir_galec::ast::ScalarType, shape: Shape) -> Self {
+        let facts = ValueFacts::for_shape(&shape);
+        Self {
+            scalar_kind,
+            shape,
+            facts,
+            stored_in: None,
+        }
+    }
+
+    pub(super) fn inferred(
+        scalar_kind: rumoca_ir_galec::ast::ScalarType,
+        shape: Shape,
+        facts: ValueFacts,
+    ) -> Self {
+        Self {
+            scalar_kind,
+            shape,
+            facts,
+            stored_in: None,
+        }
+    }
+
+    pub(super) fn assignment(
+        scalar_kind: rumoca_ir_galec::ast::ScalarType,
+        shape: Shape,
+        facts: ValueFacts,
+        stored_in: EntityId,
+    ) -> Self {
+        Self {
+            scalar_kind,
+            shape,
+            facts,
+            stored_in: Some(stored_in),
+        }
+    }
 }
 
 impl Operation {
@@ -219,7 +266,7 @@ impl NumericalFacts {
         self.values.push(Value {
             id,
             scalar_kind,
-            facts: ValueFacts::for_shape(&shape),
+            facts: ValueFacts::for_literal(literal),
             shape,
             source: ValueSource::Literal(literal),
             stored_in: None,
@@ -231,20 +278,18 @@ impl NumericalFacts {
         &mut self,
         kind: OperationKind,
         inputs: Vec<ValueId>,
-        scalar_kind: rumoca_ir_galec::ast::ScalarType,
-        shape: Shape,
         phase: rumoca_ir_galec::ast::BlockMethodKind,
-        stored_in: Option<EntityId>,
+        output: OperationOutput,
     ) -> ValueId {
         let operation_id = OperationId(self.operations.len());
         let value_id = ValueId(self.values.len());
         self.values.push(Value {
             id: value_id,
-            scalar_kind,
-            facts: ValueFacts::for_shape(&shape),
-            shape,
+            scalar_kind: output.scalar_kind,
+            facts: output.facts,
+            shape: output.shape,
             source: ValueSource::Operation(operation_id),
-            stored_in,
+            stored_in: output.stored_in,
         });
         self.operations.push(Operation {
             id: operation_id,
@@ -331,6 +376,10 @@ impl ValueFacts {
         Self::Scalar(ScalarFacts::default())
     }
 
+    pub(super) fn for_literal(literal: LiteralValue) -> Self {
+        Self::Scalar(ScalarFacts::for_literal(literal))
+    }
+
     pub(super) fn vector() -> Self {
         Self::Vector(VectorFacts::default())
     }
@@ -349,6 +398,28 @@ pub(super) struct ScalarFacts {
 }
 
 impl ScalarFacts {
+    fn for_literal(literal: LiteralValue) -> Self {
+        match literal {
+            LiteralValue::Boolean(_) => Self::default(),
+            LiteralValue::Integer(value) => Self {
+                finite: ProofStatus::ProvenTrue,
+                nonzero: proof(value != 0),
+                positive: proof(value > 0),
+                bounds: Bounds::default(),
+            },
+            LiteralValue::Real(value) if value.is_finite() => Self {
+                finite: ProofStatus::ProvenTrue,
+                nonzero: proof(value != 0.0),
+                positive: proof(value > 0.0),
+                bounds: Bounds::new(Some(value), Some(value)),
+            },
+            LiteralValue::Real(_) => Self {
+                finite: ProofStatus::ProvenFalse,
+                ..Self::default()
+            },
+        }
+    }
+
     pub(super) fn finite(&self) -> ProofStatus {
         self.finite
     }
@@ -425,6 +496,19 @@ pub(super) struct MatrixFacts {
 }
 
 impl MatrixFacts {
+    pub(super) fn from_triangularity(
+        upper_triangular: ProofStatus,
+        lower_triangular: ProofStatus,
+        invertible: ProofStatus,
+    ) -> Self {
+        Self {
+            upper_triangular,
+            lower_triangular,
+            invertible,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn symmetric(&self) -> ProofStatus {
         self.symmetric
     }
@@ -470,5 +554,13 @@ impl SparsityPattern {
 
     pub(super) fn may_be_nonzero(&self) -> &[bool] {
         &self.may_be_nonzero
+    }
+}
+
+fn proof(value: bool) -> ProofStatus {
+    if value {
+        ProofStatus::ProvenTrue
+    } else {
+        ProofStatus::ProvenFalse
     }
 }

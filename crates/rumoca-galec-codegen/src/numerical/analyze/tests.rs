@@ -1,8 +1,11 @@
 use super::*;
-use crate::numerical::facts::ValueSource;
+use crate::numerical::{
+    facts::{MatrixFacts, ProofStatus, ValueFacts, ValueSource},
+    plan::{LinearSolveAlgorithm, plan},
+};
 use rumoca_ir_galec::ast::{
-    Block, FunctionCall, InterfaceVariable, Name, ProtectedEntity, RangeAttributes, Spanned,
-    StateCompartment,
+    Block, FunctionCall, InterfaceVariable, Name, PredefinedSignal, ProtectedEntity,
+    RangeAttributes, Spanned, StateCompartment,
 };
 
 #[test]
@@ -126,6 +129,8 @@ fn records_ekf_linear_solve_then_assignment_in_do_step() {
                 arguments: vec![state_expression("S"), state_expression("residual")],
             }),
         }));
+    block.do_step.signals = vec![PredefinedSignal::SolveLinearEquationsFailed];
+    rumoca_ir_galec::validate(&block).expect("EKF solve must be valid GALEC");
 
     let facts = analyze(&block).expect("valid EKF solve should be analyzed");
     let operations = facts.operations();
@@ -138,6 +143,23 @@ fn records_ekf_linear_solve_then_assignment_in_do_step() {
     assert_eq!(operations[0].inputs().len(), 2);
     assert_eq!(operations[1].inputs(), operations[0].outputs());
 
+    let ValueFacts::Matrix(matrix_facts) = facts.value(operations[0].inputs()[0]).facts() else {
+        panic!("linear solve input must have matrix facts");
+    };
+    assert_eq!(matrix_facts.lower_triangular(), ProofStatus::Unknown);
+    assert_eq!(matrix_facts.upper_triangular(), ProofStatus::Unknown);
+
+    let numerical_plan = plan(&facts);
+    assert_eq!(numerical_plan.linear_solves().len(), 1);
+    assert_eq!(
+        numerical_plan.linear_solves()[0].algorithm(),
+        LinearSolveAlgorithm::GenericPivoted
+    );
+    assert_eq!(
+        numerical_plan.linear_solves()[0].operation(),
+        operations[0].id()
+    );
+
     let correction = facts
         .entities()
         .iter()
@@ -147,6 +169,46 @@ fn records_ekf_linear_solve_then_assignment_in_do_step() {
     let assigned = facts.value(operations[1].outputs()[0]);
     assert_eq!(assigned.stored_in(), Some(correction));
     assert!(matches!(assigned.source(), ValueSource::Operation(_)));
+}
+
+#[test]
+fn proves_lower_triangular_matrix_and_selects_forward_substitution() {
+    let matrix = matrix_expression(&[&[2.0, 0.0, 0.0], &[3.0, 4.0, 0.0], &[5.0, 6.0, 7.0]]);
+    let block = triangular_solve_block("LowerSolve", matrix);
+    rumoca_ir_galec::validate(&block).expect("lower-triangular solve must be valid GALEC");
+    let facts = analyze(&block).expect("fixed lower-triangular solve should be analyzed");
+    let matrix_facts = assigned_matrix_facts(&facts, "A");
+
+    assert_eq!(matrix_facts.lower_triangular(), ProofStatus::ProvenTrue);
+    assert_eq!(matrix_facts.upper_triangular(), ProofStatus::ProvenFalse);
+    assert_eq!(matrix_facts.invertible(), ProofStatus::ProvenTrue);
+
+    let numerical_plan = plan(&facts);
+    assert_eq!(numerical_plan.linear_solves().len(), 1);
+    assert_eq!(
+        numerical_plan.linear_solves()[0].algorithm(),
+        LinearSolveAlgorithm::ForwardSubstitution
+    );
+}
+
+#[test]
+fn proves_upper_triangular_matrix_and_selects_backward_substitution() {
+    let matrix = matrix_expression(&[&[2.0, 3.0, 5.0], &[0.0, 4.0, 6.0], &[0.0, 0.0, 7.0]]);
+    let block = triangular_solve_block("UpperSolve", matrix);
+    rumoca_ir_galec::validate(&block).expect("upper-triangular solve must be valid GALEC");
+    let facts = analyze(&block).expect("fixed upper-triangular solve should be analyzed");
+    let matrix_facts = assigned_matrix_facts(&facts, "A");
+
+    assert_eq!(matrix_facts.upper_triangular(), ProofStatus::ProvenTrue);
+    assert_eq!(matrix_facts.lower_triangular(), ProofStatus::ProvenFalse);
+    assert_eq!(matrix_facts.invertible(), ProofStatus::ProvenTrue);
+
+    let numerical_plan = plan(&facts);
+    assert_eq!(numerical_plan.linear_solves().len(), 1);
+    assert_eq!(
+        numerical_plan.linear_solves()[0].algorithm(),
+        LinearSolveAlgorithm::BackwardSubstitution
+    );
 }
 
 #[test]
@@ -281,4 +343,61 @@ fn declaration(name: &str, dimensions: &[i64]) -> VariableDeclaration {
 
 fn state_expression(name: &str) -> Expression {
     Expression::Ref(Reference::state(Name::ident(name)))
+}
+
+fn matrix_expression(rows: &[&[f64]]) -> Expression {
+    Expression::Array(
+        rows.iter()
+            .map(|row| {
+                Expression::Array(row.iter().map(|value| Expression::Real(*value)).collect())
+            })
+            .collect(),
+    )
+}
+
+fn triangular_solve_block(name: &str, matrix: Expression) -> Block {
+    let mut block = Block::new(Name::ident(name));
+    block.interface = vec![interface_with_dimensions(InterfaceKind::Input, "rhs", &[3])];
+    block.protected = vec![
+        protected_with_dimensions(ProtectedKind::State, "A", &[3, 3]),
+        protected_with_dimensions(ProtectedKind::State, "solution", &[3]),
+    ];
+    block
+        .startup
+        .statements
+        .push(Spanned::dummy(Statement::Assignment {
+            target: Reference::state(Name::ident("A")),
+            value: matrix,
+        }));
+    block
+        .do_step
+        .statements
+        .push(Spanned::dummy(Statement::Assignment {
+            target: Reference::state(Name::ident("solution")),
+            value: Expression::Call(FunctionCall {
+                function: Name::ident("solveLinearEquations"),
+                arguments: vec![state_expression("A"), state_expression("rhs")],
+            }),
+        }));
+    block.do_step.signals = vec![PredefinedSignal::SolveLinearEquationsFailed];
+    block
+}
+
+fn assigned_matrix_facts<'a>(facts: &'a NumericalFacts, entity_name: &str) -> &'a MatrixFacts {
+    let entity = facts
+        .entities()
+        .iter()
+        .find(|entity| entity.name() == entity_name)
+        .expect("matrix entity")
+        .id();
+    let assigned = facts
+        .values()
+        .iter()
+        .rev()
+        .find(|value| value.stored_in() == Some(entity))
+        .expect("assigned matrix value");
+    let ValueFacts::Matrix(matrix) = assigned.facts() else {
+        panic!("assigned matrix value must have matrix facts");
+    };
+    matrix
 }
