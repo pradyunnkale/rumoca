@@ -26,7 +26,7 @@ For setup and day-to-day usage, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 | [SPEC_0031](SPEC_0031_COMPILER_PHILOSOPHY.md) | Compiler Scope and Philosophy | architecture | ~150 | ACCEPTED |
 | [SPEC_0032](SPEC_0032_RANGE_PRESERVING_TENSORS.md) | Range-Preserving Tensor IR | IR | ~85 | ACCEPTED |
 | [SPEC_0034](SPEC_0034_GALEC_EFMI_EXPORT.md) | eFMI/GALEC Algorithm Code Export | target/codegen | ~205 | DRAFT |
-| [SPEC_0035](SPEC_0035_GALEC_NUMERICAL_PLANNING.md) | GALEC Numerical Planning | target/codegen | ~200 | DRAFT |
+| [SPEC_0035](SPEC_0035_GALEC_NUMERICAL_PLANNING.md) | GALEC Numerical Planning | target/codegen | ~250 | DRAFT |
 
 ## Deferred Specifications
 

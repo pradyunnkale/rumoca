@@ -39,9 +39,9 @@
 //!   anchored on the DoStep `self` parameter (`FP_DOSTEP_SELF`) with the C
 //!   field name as whole-field `componentIdentifier` (no indices — arrays
 //!   map as the field; D5/D7), plus one `FunctionReference` per block
-//!   method. No `ErrorSignalStatus` mapping is emitted: the generated
-//!   methods return void and expose no status variable (D8; the
-//!   cross-validator permits, never requires, an ESS mapping).
+//!   method. Blocks that expose a supported runtime signal additionally map
+//!   the Algorithm Code `ErrorSignalStatus` anchor onto the generated state
+//!   struct's `error_signal_status` bitset.
 //!
 //! Post-validation (GAL-004 idiom): the assembled manifest is checked by
 //! [`ProductionCodeManifest::new`] and then cross-validated against the
@@ -78,6 +78,8 @@ const STATE_TYPEDEF_ID: &str = "TD_STATE";
 /// Component ids are `CO_<i>`, aligned with the manifest variable ids
 /// `V<i>` ([`crate::manifest_vars`] id scheme).
 const COMPONENT_ID_PREFIX: &str = "CO_";
+const ERROR_SIGNAL_STATUS_COMPONENT_ID: &str = "CO_ESS";
+const ERROR_SIGNAL_STATUS_FIELD: &str = "error_signal_status";
 /// The `TT_VOID`/`TD_VOID` C token (the scalar tokens come from the shared
 /// `crate::emit::c_scalar_binding`; `void` is not a GALEC scalar type).
 const VOID_C_TYPE: &str = "void";
@@ -249,6 +251,30 @@ fn variable_mappings(
             component_identifier: Some(NormalizedText::new(c_name)?),
         });
     }
+    if [
+        &package.block.startup,
+        &package.block.recalibrate,
+        &package.block.do_step,
+    ]
+    .into_iter()
+    .any(|method| !method.signals.is_empty())
+    {
+        components.push(Component {
+            id: Identifier::new(ERROR_SIGNAL_STATUS_COMPONENT_ID)?,
+            name: NormalizedText::new(ERROR_SIGNAL_STATUS_FIELD)?,
+            type_def_ref_id: Identifier::new("TD_U32")?,
+            dimensions: Vec::new(),
+            pointer: false,
+        });
+        data_references.push(DataReference {
+            foreign: ForeignReference {
+                manifest_reference_ref_id: Identifier::new(MANIFEST_REFERENCE_ID)?,
+                foreign_ref_id: Identifier::new("ESS")?,
+            },
+            formal_parameter_ref_id: Identifier::new(DOSTEP_SELF_PARAMETER_ID)?,
+            component_identifier: Some(NormalizedText::new(ERROR_SIGNAL_STATUS_FIELD)?),
+        });
+    }
     Ok((components, data_references))
 }
 
@@ -259,8 +285,12 @@ fn type_bindings(
     struct_name: &str,
     components: Vec<Component>,
 ) -> Result<(Vec<TargetType>, Vec<Typedef>), GalecTargetError> {
-    let mut target_types = Vec::with_capacity(SCALAR_TYPES.len() + 1);
-    let mut typedefs = Vec::with_capacity(SCALAR_TYPES.len() + 2);
+    let has_error_signal_status = components
+        .iter()
+        .any(|component| component.id.as_str() == ERROR_SIGNAL_STATUS_COMPONENT_ID);
+    let extra_status_type = usize::from(has_error_signal_status);
+    let mut target_types = Vec::with_capacity(SCALAR_TYPES.len() + 1 + extra_status_type);
+    let mut typedefs = Vec::with_capacity(SCALAR_TYPES.len() + 2 + extra_status_type);
     for scalar in SCALAR_TYPES {
         let (kind, c_token) = crate::emit::c_scalar_binding(scalar);
         let (target_type_id, type_def_id) = scalar_type_ids(scalar);
@@ -270,6 +300,14 @@ fn type_bindings(
             coded_type: NormalizedText::new(c_token)?,
         });
         typedefs.push(alias_typedef(type_def_id, c_token, target_type_id)?);
+    }
+    if has_error_signal_status {
+        target_types.push(TargetType {
+            id: Identifier::new("TT_U32")?,
+            kind: TargetTypeKind::EfmiUnsignedInteger32,
+            coded_type: NormalizedText::new("uint32_t")?,
+        });
+        typedefs.push(alias_typedef("TD_U32", "uint32_t", "TT_U32")?);
     }
     target_types.push(TargetType {
         id: Identifier::new("TT_VOID")?,
@@ -467,12 +505,13 @@ fn code_file_entry(id: &str, file: &EmittedCodeFile) -> Result<File, GalecTarget
 mod tests {
     use super::*;
     use crate::manifest_context::algorithm_code_manifest::{
-        BlockCausality, BooleanVariable, IntegerVariable, RealVariable, StartValue,
+        BlockCausality, BooleanVariable, ErrorSignal, IntegerVariable, RealVariable, StartValue,
         Variable as ManifestVariable, VariableCommon,
     };
     use rumoca_ir_galec::ast::{
-        Block, Dimension, Expression, InterfaceKind, InterfaceVariable, Name, ProtectedEntity,
-        ProtectedKind, TypeRef, VariableDeclaration,
+        Block, Dimension, Expression, FunctionCall, InterfaceKind, InterfaceVariable, Name,
+        PredefinedSignal, ProtectedEntity, ProtectedKind, Reference, Spanned, Statement, TypeRef,
+        VariableDeclaration,
     };
 
     use crate::package::ManifestFragment;
@@ -592,6 +631,80 @@ mod tests {
                 do_step_signals: vec![],
             },
             alg_file_name: "TestBlock.alg".to_owned(),
+        }
+    }
+
+    fn numerical_signal_package() -> AlgorithmCodePackage {
+        let array_decl = |name: &str, dimensions: &[i64]| VariableDeclaration {
+            ty: TypeRef::Primitive(ScalarType::Real),
+            name: Name::ident(name),
+            dimensions: dimensions
+                .iter()
+                .map(|size| Dimension::Expr(Expression::Integer(*size)))
+                .collect(),
+            range: Default::default(),
+            span: rumoca_core::Span::DUMMY,
+        };
+        let mut block = Block::new(Name::ident("NumericalStatus"));
+        block.interface = vec![
+            InterfaceVariable {
+                kind: InterfaceKind::Input,
+                decl: array_decl("rhs", &[2]),
+                start: None,
+            },
+            InterfaceVariable {
+                kind: InterfaceKind::TunableParameter,
+                decl: array_decl("matrix", &[2, 2]),
+                start: None,
+            },
+        ];
+        block.protected = vec![
+            ProtectedEntity {
+                kind: ProtectedKind::State,
+                decl: array_decl("solution", &[2]),
+                start: None,
+            },
+            ProtectedEntity {
+                kind: ProtectedKind::Constant,
+                decl: scalar_decl(ScalarType::Real, "samplePeriod"),
+                start: Some(Expression::Real(0.01)),
+            },
+        ];
+        block
+            .do_step
+            .statements
+            .push(Spanned::dummy(Statement::Assignment {
+                target: Reference::state(Name::ident("solution")),
+                value: Expression::Call(FunctionCall {
+                    function: Name::ident("solveLinearEquations"),
+                    arguments: vec![
+                        Expression::Ref(Reference::state(Name::ident("matrix"))),
+                        Expression::Ref(Reference::state(Name::ident("rhs"))),
+                    ],
+                }),
+            }));
+        block.do_step.signals = vec![PredefinedSignal::SolveLinearEquationsFailed];
+        AlgorithmCodePackage {
+            block,
+            manifest: ManifestFragment {
+                variables: vec![
+                    real_variable("V1", "rhs", BlockCausality::Input, vec![2], 0.0),
+                    real_variable(
+                        "V2",
+                        "matrix",
+                        BlockCausality::TunableParameter,
+                        vec![2, 2],
+                        0.0,
+                    ),
+                    real_variable("V3", "solution", BlockCausality::State, vec![2], 0.0),
+                    real_variable("V4", "samplePeriod", BlockCausality::Constant, vec![], 0.01),
+                ],
+                clock_variable_ref_id: ident("V4"),
+                startup_signals: vec![],
+                recalibrate_signals: vec![],
+                do_step_signals: vec![ErrorSignal::SolveLinearEquationsFailed],
+            },
+            alg_file_name: "NumericalStatus.alg".to_owned(),
         }
     }
 
@@ -721,6 +834,39 @@ mod tests {
         );
         // D8: no ErrorSignalStatus mapping.
         assert!(!foreign_ids.contains(&"ESS"));
+    }
+
+    #[test]
+    fn maps_numerical_error_signal_status_to_unsigned_state_field() {
+        let package = numerical_signal_package();
+        let ac = ac_of(&package);
+        let pc = assemble(&package, &ac).expect("numerical status mapping assembles");
+        let status = state_components(&pc)
+            .iter()
+            .find(|component| component.id.as_str() == ERROR_SIGNAL_STATUS_COMPONENT_ID)
+            .expect("status component");
+        assert_eq!(status.name.as_str(), ERROR_SIGNAL_STATUS_FIELD);
+        assert_eq!(status.type_def_ref_id.as_str(), "TD_U32");
+        assert!(pc.parts().code_container.target_types.iter().any(|target| {
+            target.id.as_str() == "TT_U32"
+                && target.kind == TargetTypeKind::EfmiUnsignedInteger32
+                && target.coded_type.as_str() == "uint32_t"
+        }));
+        assert!(
+            pc.parts()
+                .code_container
+                .logical_data
+                .data_references
+                .iter()
+                .any(|reference| {
+                    reference.foreign.foreign_ref_id.as_str() == "ESS"
+                        && reference
+                            .component_identifier
+                            .as_ref()
+                            .map(NormalizedText::as_str)
+                            == Some(ERROR_SIGNAL_STATUS_FIELD)
+                })
+        );
     }
 
     // ---- full variable coverage + lockstep C bindings -------------------

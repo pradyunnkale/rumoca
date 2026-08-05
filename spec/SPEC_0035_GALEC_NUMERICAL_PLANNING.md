@@ -65,17 +65,43 @@ pub(super) fn analyze(
 ) -> Result<NumericalFacts, NumericalAnalysisError>
 ```
 
+Located in `crates/rumoca-galec-codegen/src/numerical/plan.rs`:
+
+```rust
+pub(crate) enum LinearSolveAlgorithm {
+    Diagonal,
+    ForwardSubstitution,
+    BackwardSubstitution,
+    GenericPivoted,
+}
+
+pub(crate) struct NumericalPlan {
+    linear_solves: Vec<LinearSolvePlan>,
+}
+```
+
 The initial declaration and operation pass is implemented for direct
 assignments, arithmetic expressions, fixed rank-one/rank-two array
 constructors, and `solveLinearEquations`. Initial triangularity inference and
-linear-solve planning are implemented. Full GALEC statement/expression
-coverage and production routing remain implementation gaps.
+linear-solve planning are implemented. Embedded C context construction invokes
+planning when a block method contains `solveLinearEquations`; blocks without a
+linear solve retain the existing C lowering path.
 
-The initial embedded C lowering also selects helper-backed representations for
-basic `Real` array arithmetic. This is a typed codegen selection at the GALEC
-to C-context boundary; routing the general `NumericalPlan` through production
-codegen remains future work. Rust supplies structured `array_binary` and `dot`
-context data, while the Jinja template owns helper definitions and C syntax.
+The embedded C lowerer consumes the selected linear-solve algorithms and emits
+structured `linear_solve` context data. The Jinja template owns diagonal,
+forward-substitution, backward-substitution, and generic partial-pivoting C
+kernels. A failed kernel sets bit 3 of `error_signal_status`; Production Code
+maps that field to the Algorithm Code `ErrorSignalStatus` logical datum.
+
+Current implementation limits are explicit:
+
+| Limit | Current behavior | Extension owner |
+|---|---|---|
+| Statements other than direct assignments | Numerical analysis returns `ET030` | `analyze.rs` |
+| Expressions outside the initial arithmetic/constructor/solve subset | Numerical analysis returns `ET031` | `analyze.rs` |
+| Linear-solve operands that are not stored references | Embedded C returns a target diagnostic | `c_lower.rs` |
+| Plan-to-lowering association | Solve algorithms are consumed in analysis order | plan + C context lowering |
+| Proof derivations and branch/loop joins | Not yet implemented | numerical facts + analyzer |
 
 ### Fact Ownership
 
@@ -125,6 +151,8 @@ not a runtime tolerance test.
 | Planning preserves error-signal and NaN behavior | plan + kernels | Numerical speed cannot change semantics |
 | General dense implementations are mandatory fallbacks | numerical library | Unknown facts remain executable |
 | Kernel names are plan data, not emitted source strings | plan + template context | Keep rendering template-owned |
+| A failed linear solve sets predefined signal bit 3 | generated runtime | Preserve GALEC failure signaling |
+| Method entry clears the generated status word | generated runtime | Status reports the current invocation |
 
 The initial planner rules are:
 
@@ -156,7 +184,7 @@ positive-definiteness inference is implemented.
 | Quaternion angular-rate integration | Complete ordered four-component first-order integration pattern | Preserve the original component assignments |
 | Quaternion normalization with identity fallback | Whole-array division guarded by an if-expression with `{1,0,0,0}` fallback | Preserve the original component assignments |
 | Common vector affine forms | Exact whole-array add/scale expression trees | Preserve the original scalar-expanded expression |
-| Linear solve | Required for EKF | Pivoted general fallback |
+| Linear solve | Direct whole-vector assignment with stored matrix/RHS operands | Target diagnostic for unsupported operand form; pivoted fallback for unknown facts |
 | Matrix product/transpose recognition | Deferred until a valid GALEC loop/function pattern exists | Existing generic emission |
 | Sparse kernels | Deferred | Dense fallback |
 
@@ -199,7 +227,8 @@ never defaulted.
 | A fixed lower-triangular matrix proves lower true, upper false, and invertible true | Triangularity inference |
 | Proven lower/upper triangular solves choose forward/backward substitution | Specialized planning |
 | An unknown matrix chooses the generic pivoted solve | Sound fallback |
-| Generated C compiles and matches the dense reference result | Backend integration |
+| Every selected solve kernel compiles and matches a dense reference result | Backend integration |
+| Singular or NaN-pivot failure sets bit 3 and maps `ErrorSignalStatus` | Runtime/eFMI signaling |
 
 ## Rationale
 

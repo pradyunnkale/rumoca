@@ -1,11 +1,22 @@
 use super::facts::{NumericalFacts, OperationId, OperationKind, ProofStatus, ValueFacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LinearSolveAlgorithm {
+pub(crate) enum LinearSolveAlgorithm {
     Diagonal,
     ForwardSubstitution,
     BackwardSubstitution,
     GenericPivoted,
+}
+
+impl LinearSolveAlgorithm {
+    pub(crate) const fn kernel_name(self) -> &'static str {
+        match self {
+            Self::Diagonal => "diagonal",
+            Self::ForwardSubstitution => "forward",
+            Self::BackwardSubstitution => "backward",
+            Self::GenericPivoted => "generic_pivoted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +26,7 @@ pub(super) struct LinearSolvePlan {
 }
 
 impl LinearSolvePlan {
+    #[cfg(test)]
     pub(super) fn operation(&self) -> OperationId {
         self.operation
     }
@@ -25,13 +37,20 @@ impl LinearSolvePlan {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct NumericalPlan {
+pub(crate) struct NumericalPlan {
     linear_solves: Vec<LinearSolvePlan>,
 }
 
 impl NumericalPlan {
+    #[cfg(test)]
     pub(super) fn linear_solves(&self) -> &[LinearSolvePlan] {
         &self.linear_solves
+    }
+
+    pub(crate) fn linear_solve_algorithms(
+        &self,
+    ) -> impl ExactSizeIterator<Item = LinearSolveAlgorithm> + '_ {
+        self.linear_solves.iter().map(LinearSolvePlan::algorithm)
     }
 }
 

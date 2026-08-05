@@ -30,7 +30,8 @@ use crate::manifest_context::{
 };
 use rumoca_ir_galec::ast::{
     Associativity, Block, Condition, Dimension, Expression, InterfaceKind, Name, PrecedenceClass,
-    ProtectedKind, Reference, ScalarType, Spanned, Statement, TypeRef, VariableDeclaration,
+    PredefinedSignal, ProtectedKind, Reference, ScalarType, Spanned, Statement, TypeRef,
+    VariableDeclaration,
 };
 
 use crate::diagnostic::GalecTargetError;
@@ -481,6 +482,9 @@ struct CContext {
     variables: Vec<CVariable>,
     /// Method bodies as structured C codegen IR.
     methods: CMethods,
+    /// Whether the block exposes an error-signal status word. The initial
+    /// numerical slice uses bit 3 for `SOLVE_LINEAR_EQUATIONS_FAILED`.
+    has_error_signal_status: bool,
 }
 
 #[derive(Serialize)]
@@ -541,8 +545,13 @@ pub fn c_template_context(
             })
         })
         .collect::<Result<Vec<_>, GalecTargetError>>()?;
-    let lowerer = crate::c_lower::CContextLowerer::new(&names);
+    let numerical_plan = crate::numerical::plan_embedded_block(&package.block)
+        .map_err(|error| error.into_target_error())?;
+    let lowerer = crate::c_lower::CContextLowerer::with_numerical_plan(&names, &numerical_plan);
     let function_prefix = crate::c_mangle::c_identifier(&package.block.name)?;
+    let startup = statements(&package.block.startup.statements, &lowerer)?;
+    let recalibrate = statements(&package.block.recalibrate.statements, &lowerer)?;
+    let do_step = statements(&package.block.do_step.statements, &lowerer)?;
     let context = CContext {
         model_name: model_name.to_owned(),
         block_name: c_comment_text(&block_display_name(&package.block.name)),
@@ -551,10 +560,11 @@ pub fn c_template_context(
         function_prefix,
         variables,
         methods: CMethods {
-            startup: statements(&package.block.startup.statements, &lowerer)?,
-            recalibrate: statements(&package.block.recalibrate.statements, &lowerer)?,
-            do_step: statements(&package.block.do_step.statements, &lowerer)?,
+            startup,
+            recalibrate,
+            do_step,
         },
+        has_error_signal_status: block_has_method_signals(&package.block),
     };
     serde_json::to_value(&context).map_err(|error| GalecTargetError::LoweringInternal {
         detail: format!("C template context serialization failed: {error}"),
@@ -597,8 +607,13 @@ pub fn c_template_context_for_block(
             &names,
         )?);
     }
-    let lowerer = crate::c_lower::CContextLowerer::new(&names);
+    let numerical_plan =
+        crate::numerical::plan_embedded_block(block).map_err(|error| error.into_target_error())?;
+    let lowerer = crate::c_lower::CContextLowerer::with_numerical_plan(&names, &numerical_plan);
     let function_prefix = crate::c_mangle::c_identifier(&block.name)?;
+    let startup = statements(&block.startup.statements, &lowerer)?;
+    let recalibrate = statements(&block.recalibrate.statements, &lowerer)?;
+    let do_step = statements(&block.do_step.statements, &lowerer)?;
     let context = CContext {
         model_name: model_name.to_owned(),
         block_name: c_comment_text(&block_display_name(&block.name)),
@@ -607,14 +622,21 @@ pub fn c_template_context_for_block(
         function_prefix,
         variables,
         methods: CMethods {
-            startup: statements(&block.startup.statements, &lowerer)?,
-            recalibrate: statements(&block.recalibrate.statements, &lowerer)?,
-            do_step: statements(&block.do_step.statements, &lowerer)?,
+            startup,
+            recalibrate,
+            do_step,
         },
+        has_error_signal_status: block_has_method_signals(block),
     };
     serde_json::to_value(&context).map_err(|error| GalecTargetError::LoweringInternal {
         detail: format!("C template context serialization failed: {error}"),
     })
+}
+
+fn block_has_method_signals(block: &Block) -> bool {
+    [&block.startup, &block.recalibrate, &block.do_step]
+        .into_iter()
+        .any(|method| !method.signals.is_empty())
 }
 
 fn next_variable_id(ordinal: &mut usize) -> String {
@@ -713,8 +735,14 @@ pub(crate) fn ensure_c_exportable(block: &Block) -> Result<(), GalecTargetError>
         return Err(unsupported("user-defined functions"));
     }
     for method in [&block.startup, &block.recalibrate, &block.do_step] {
-        if !method.signals.is_empty() {
-            return Err(unsupported("a block-method `signals` clause"));
+        if method
+            .signals
+            .iter()
+            .any(|signal| *signal != PredefinedSignal::SolveLinearEquationsFailed)
+        {
+            return Err(unsupported(
+                "a block-method `signals` clause other than `SOLVE_LINEAR_EQUATIONS_FAILED`",
+            ));
         }
         if !method.locals.is_empty() {
             return Err(unsupported("method-local variables"));

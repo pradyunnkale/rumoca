@@ -789,8 +789,13 @@ impl BuiltinScalarTypeIds {
 mod tests {
     use super::*;
     use crate::compile::{CompilationResult, Session, SessionConfig};
-    use rumoca_core::{VarName, pre_slot_name};
+    use rumoca_core::{Span, VarName, pre_slot_name};
     use rumoca_ir_dae::component_base_name;
+    use rumoca_ir_galec::ast::{
+        Block, Dimension, Expression, FunctionCall, InterfaceKind, InterfaceVariable, Name,
+        PredefinedSignal, ProtectedEntity, ProtectedKind, RangeAttributes, Reference, Spanned,
+        Statement, TypeRef, VariableDeclaration,
+    };
 
     /// Fixed-sample discrete fixture exercising every mapping rule:
     /// Real/Integer/Boolean parameters and constants, a `pre()` slot on an
@@ -825,6 +830,101 @@ end GalecFacadeDemo;
         map.get(&VarName::new(name)).copied()
     }
 
+    fn numerical_declaration(name: &str, dimensions: &[i64]) -> VariableDeclaration {
+        VariableDeclaration {
+            ty: TypeRef::Primitive(ScalarType::Real),
+            name: Name::ident(name),
+            dimensions: dimensions
+                .iter()
+                .map(|size| Dimension::Expr(Expression::Integer(*size)))
+                .collect(),
+            range: RangeAttributes::default(),
+            span: Span::DUMMY,
+        }
+    }
+
+    fn numerical_linear_solve_block() -> Block {
+        let mut block = Block::new(Name::ident("NumericalSlice"));
+        block.interface.push(InterfaceVariable {
+            kind: InterfaceKind::Input,
+            decl: numerical_declaration("rhs", &[2]),
+            start: None,
+        });
+        block.protected.extend([
+            ProtectedEntity {
+                kind: ProtectedKind::State,
+                decl: numerical_declaration("matrix", &[2, 2]),
+                start: None,
+            },
+            ProtectedEntity {
+                kind: ProtectedKind::State,
+                decl: numerical_declaration("solution", &[2]),
+                start: None,
+            },
+        ]);
+        block
+            .startup
+            .statements
+            .push(Spanned::dummy(Statement::Assignment {
+                target: Reference::state(Name::ident("matrix")),
+                value: Expression::Array(vec![
+                    Expression::Array(vec![Expression::Real(2.0), Expression::Real(0.0)]),
+                    Expression::Array(vec![Expression::Real(3.0), Expression::Real(4.0)]),
+                ]),
+            }));
+        block
+            .do_step
+            .statements
+            .push(Spanned::dummy(Statement::Assignment {
+                target: Reference::state(Name::ident("solution")),
+                value: Expression::Call(FunctionCall {
+                    function: Name::ident("solveLinearEquations"),
+                    arguments: vec![
+                        Expression::Ref(Reference::state(Name::ident("matrix"))),
+                        Expression::Ref(Reference::state(Name::ident("rhs"))),
+                    ],
+                }),
+            }));
+        block.do_step.signals = vec![PredefinedSignal::SolveLinearEquationsFailed];
+        block
+    }
+
+    fn unknown_matrix_linear_solve_block() -> Block {
+        let mut block = Block::new(Name::ident("GenericNumericalSlice"));
+        block.interface.extend([
+            InterfaceVariable {
+                kind: InterfaceKind::Input,
+                decl: numerical_declaration("rhs", &[2]),
+                start: None,
+            },
+            InterfaceVariable {
+                kind: InterfaceKind::TunableParameter,
+                decl: numerical_declaration("matrix", &[2, 2]),
+                start: None,
+            },
+        ]);
+        block.protected.push(ProtectedEntity {
+            kind: ProtectedKind::State,
+            decl: numerical_declaration("solution", &[2]),
+            start: None,
+        });
+        block
+            .do_step
+            .statements
+            .push(Spanned::dummy(Statement::Assignment {
+                target: Reference::state(Name::ident("solution")),
+                value: Expression::Call(FunctionCall {
+                    function: Name::ident("solveLinearEquations"),
+                    arguments: vec![
+                        Expression::Ref(Reference::state(Name::ident("matrix"))),
+                        Expression::Ref(Reference::state(Name::ident("rhs"))),
+                    ],
+                }),
+            }));
+        block.do_step.signals = vec![PredefinedSignal::SolveLinearEquationsFailed];
+        block
+    }
+
     #[test]
     fn scalar_type_map_types_parameters_and_constants_from_flat() {
         let result = compile(DISCRETE_SOURCE, "GalecFacadeDemo");
@@ -836,6 +936,96 @@ end GalecFacadeDemo;
         assert_eq!(get(&map, "enabled"), Some(ScalarType::Boolean));
         assert_eq!(get(&map, "y"), Some(ScalarType::Real));
         assert_eq!(get(&map, "count"), Some(ScalarType::Integer));
+    }
+
+    #[test]
+    fn numerical_plan_selects_renders_and_executes_forward_substitution() {
+        if std::process::Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping GALEC numerical C runtime test: cc not available");
+            return;
+        }
+
+        let block = numerical_linear_solve_block();
+        let context = rumoca_galec_codegen::c_template_context_for_block(&block, "NumericalSlice")
+            .expect("validated numerical block should lower to the C context");
+        assert_eq!(context["methods"]["do_step"][0]["algorithm"], "forward");
+        assert_eq!(context["has_error_signal_status"], true);
+
+        let sources = render_galec_c_files_from_context(&context, GALEC_C_TARGET)
+            .expect("planned context should render through the shared C templates");
+        assert!(sources.c_source.contains("rumoca_linear_solve_forward"));
+        assert!(sources.c_header.contains("uint32_t error_signal_status"));
+
+        let directory = tempfile::tempdir().expect("temporary C build directory");
+        let header = directory.path().join("NumericalSlice.h");
+        let source = directory.path().join("NumericalSlice.c");
+        let driver = directory.path().join("driver.c");
+        let executable = directory.path().join("numerical-slice");
+        std::fs::write(&header, sources.c_header).expect("write generated header");
+        std::fs::write(&source, sources.c_source).expect("write generated source");
+        std::fs::write(
+            &driver,
+            r#"#include "NumericalSlice.h"
+
+int main(void) {
+    NumericalSliceState state = {0};
+    state.rhs[0] = 2.0;
+    state.rhs[1] = 11.0;
+    NumericalSlice_startup(&state);
+    NumericalSlice_dostep(&state);
+    if (state.error_signal_status != 0) return 1;
+    if (state.solution[0] < 0.999999 || state.solution[0] > 1.000001) return 2;
+    if (state.solution[1] < 1.999999 || state.solution[1] > 2.000001) return 3;
+    return 0;
+}
+"#,
+        )
+        .expect("write C driver");
+        let output = std::process::Command::new("cc")
+            .args(["-std=c99", "-Wall", "-Wextra", "-Werror"])
+            .arg(&source)
+            .arg(&driver)
+            .args(["-lm", "-o"])
+            .arg(&executable)
+            .output()
+            .expect("invoke C compiler");
+        assert!(
+            output.status.success(),
+            "generated numerical C failed to compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(&executable)
+            .output()
+            .expect("run generated numerical C");
+        assert!(
+            output.status.success(),
+            "generated numerical C returned {:?}:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn numerical_plan_routes_unknown_matrix_to_generic_pivoted_kernel() {
+        let block = unknown_matrix_linear_solve_block();
+        let context =
+            rumoca_galec_codegen::c_template_context_for_block(&block, "GenericNumericalSlice")
+                .expect("unknown matrix must remain executable through the generic fallback");
+        assert_eq!(
+            context["methods"]["do_step"][0]["algorithm"],
+            "generic_pivoted"
+        );
+        let sources = render_galec_c_files_from_context(&context, GALEC_C_TARGET)
+            .expect("generic numerical plan should render");
+        assert!(
+            sources
+                .c_source
+                .contains("rumoca_linear_solve_generic_pivoted")
+        );
     }
 
     /// Generated condition/`__pre__` variables are typed by the

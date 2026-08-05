@@ -29,21 +29,37 @@
 use rumoca_ir_galec::ast::{
     BinaryOp, Condition, Expression, IfExpression, Name, Reference, Spanned, Statement,
 };
+use std::cell::Cell;
 
 use crate::c_mangle::CNameTable;
 use crate::diagnostic::GalecTargetError;
+use crate::numerical::{LinearSolveAlgorithm, NumericalPlan};
 
 /// GALEC-statement/-expression → structured C codegen IR lowerer over one
 /// package's collision-checked C name table.
 pub struct CContextLowerer<'a> {
     names: &'a CNameTable,
+    linear_solve_algorithms: Vec<LinearSolveAlgorithm>,
+    next_linear_solve: Cell<usize>,
 }
 
 impl<'a> CContextLowerer<'a> {
     /// Lowerer over the package's C name table.
     #[must_use]
     pub fn new(names: &'a CNameTable) -> Self {
-        Self { names }
+        Self {
+            names,
+            linear_solve_algorithms: Vec::new(),
+            next_linear_solve: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn with_numerical_plan(names: &'a CNameTable, plan: &NumericalPlan) -> Self {
+        Self {
+            names,
+            linear_solve_algorithms: plan.linear_solve_algorithms().collect(),
+            next_linear_solve: Cell::new(0),
+        }
     }
 
     /// Lower one GALEC statement to structured, serializable C codegen IR.
@@ -137,6 +153,9 @@ impl<'a> CContextLowerer<'a> {
         target: &Reference,
         value: &Expression,
     ) -> Result<Vec<serde_json::Value>, GalecTargetError> {
+        if let Some(context) = self.linear_solve_context(target, value)? {
+            return Ok(vec![context]);
+        }
         if let Expression::Array(elements) = value {
             let mut assignments = Vec::new();
             self.array_assignment_context(target, elements, &mut Vec::new(), &mut assignments)?;
@@ -170,6 +189,82 @@ impl<'a> CContextLowerer<'a> {
             return Ok(assignments);
         }
         Ok(vec![self.assignment_context(target, value)?])
+    }
+
+    fn linear_solve_context(
+        &self,
+        target: &Reference,
+        value: &Expression,
+    ) -> Result<Option<serde_json::Value>, GalecTargetError> {
+        let Expression::Call(call) = value else {
+            return Ok(None);
+        };
+        if call.function.lexeme() != "solveLinearEquations" {
+            return Ok(None);
+        }
+        let [matrix, rhs] = call.arguments.as_slice() else {
+            return Err(GalecTargetError::LoweringInternal {
+                detail: format!(
+                    "planned solveLinearEquations call has {} arguments instead of 2",
+                    call.arguments.len()
+                ),
+            });
+        };
+        let Expression::Ref(matrix) = matrix else {
+            return Err(GalecTargetError::CExportUnsupported {
+                construct: "a linear solve with a non-reference matrix operand",
+                detail: "the initial embedded numerical kernel requires a stored matrix".to_owned(),
+            });
+        };
+        let Expression::Ref(rhs) = rhs else {
+            return Err(GalecTargetError::CExportUnsupported {
+                construct: "a linear solve with a non-reference right-hand side",
+                detail: "the initial embedded numerical kernel requires a stored vector".to_owned(),
+            });
+        };
+        let Some([size]) = self.whole_array_dimensions(target) else {
+            return Err(GalecTargetError::LoweringInternal {
+                detail: "planned linear-solve target is not a whole vector".to_owned(),
+            });
+        };
+        let Some(matrix_dimensions @ [rows, columns]) = self.whole_array_dimensions(matrix) else {
+            return Err(GalecTargetError::LoweringInternal {
+                detail: "planned linear-solve matrix is not a whole matrix".to_owned(),
+            });
+        };
+        let Some(rhs_dimensions @ [rhs_size]) = self.whole_array_dimensions(rhs) else {
+            return Err(GalecTargetError::LoweringInternal {
+                detail: "planned linear-solve right-hand side is not a whole vector".to_owned(),
+            });
+        };
+        if rows != columns || rows != size || rhs_size != size {
+            return Err(GalecTargetError::LoweringInternal {
+                detail: format!(
+                    "planned linear-solve dimensions disagree: target [{size}], matrix [{rows}, {columns}], rhs [{rhs_size}]"
+                ),
+            });
+        }
+        let plan_index = self.next_linear_solve.get();
+        let algorithm = self
+            .linear_solve_algorithms
+            .get(plan_index)
+            .copied()
+            .ok_or_else(|| GalecTargetError::LoweringInternal {
+                detail: "C lowering encountered a linear solve missing from NumericalPlan"
+                    .to_owned(),
+            })?;
+        self.next_linear_solve.set(plan_index + 1);
+        Ok(Some(serde_json::json!({
+            "kind": "linear_solve",
+            "algorithm": algorithm.kernel_name(),
+            "target": self.reference_context(target)?,
+            "target_dimensions": [*size],
+            "matrix": self.reference_context(matrix)?,
+            "matrix_dimensions": matrix_dimensions,
+            "rhs": self.reference_context(rhs)?,
+            "rhs_dimensions": rhs_dimensions,
+            "size": size,
+        })))
     }
 
     fn array_assignment_context(
@@ -1119,10 +1214,10 @@ fn is_quaternion_identity_literal(expression: &Expression) -> bool {
             })
 }
 
-fn component_assignment_group<'a>(
-    statements: &'a [Spanned<Statement>],
+fn component_assignment_group(
+    statements: &[Spanned<Statement>],
     count: usize,
-) -> Option<(Reference, Vec<&'a Expression>)> {
+) -> Option<(Reference, Vec<&Expression>)> {
     let selected = statements.get(..count)?;
     let mut target = None;
     let mut values = Vec::with_capacity(count);

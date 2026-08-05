@@ -52,10 +52,12 @@ pub struct Entity {
 }
 
 impl Entity {
+    #[cfg(test)]
     pub(super) fn id(&self) -> EntityId {
         self.id
     }
 
+    #[cfg(test)]
     pub(super) fn name(&self) -> &str {
         &self.name
     }
@@ -68,6 +70,7 @@ impl Entity {
         &self.shape
     }
 
+    #[cfg(test)]
     pub(super) fn role(&self) -> EntityRole {
         self.role
     }
@@ -75,7 +78,6 @@ impl Entity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Value {
-    id: ValueId,
     scalar_kind: rumoca_ir_galec::ast::ScalarType,
     shape: Shape,
     facts: ValueFacts,
@@ -84,10 +86,6 @@ pub struct Value {
 }
 
 impl Value {
-    pub(super) fn id(&self) -> ValueId {
-        self.id
-    }
-
     pub(super) fn scalar_kind(&self) -> rumoca_ir_galec::ast::ScalarType {
         self.scalar_kind
     }
@@ -100,10 +98,12 @@ impl Value {
         &self.facts
     }
 
+    #[cfg(test)]
     pub(super) fn source(&self) -> ValueSource {
         self.source
     }
 
+    #[cfg(test)]
     pub(super) fn stored_in(&self) -> Option<EntityId> {
         self.stored_in
     }
@@ -177,10 +177,12 @@ impl Operation {
         &self.inputs
     }
 
+    #[cfg(test)]
     pub(super) fn outputs(&self) -> &[ValueId] {
         &self.outputs
     }
 
+    #[cfg(test)]
     pub(super) fn phase(&self) -> rumoca_ir_galec::ast::BlockMethodKind {
         self.phase
     }
@@ -245,7 +247,6 @@ impl NumericalFacts {
         let declaration = &self.entities[entity.0];
         let id = ValueId(self.values.len());
         self.values.push(Value {
-            id,
             scalar_kind: declaration.scalar_kind,
             shape: declaration.shape.clone(),
             facts: ValueFacts::for_shape(&declaration.shape),
@@ -264,7 +265,6 @@ impl NumericalFacts {
         let shape = Shape::new(Vec::new());
         let id = ValueId(self.values.len());
         self.values.push(Value {
-            id,
             scalar_kind,
             facts: ValueFacts::for_literal(literal),
             shape,
@@ -284,7 +284,6 @@ impl NumericalFacts {
         let operation_id = OperationId(self.operations.len());
         let value_id = ValueId(self.values.len());
         self.values.push(Value {
-            id: value_id,
             scalar_kind: output.scalar_kind,
             facts: output.facts,
             shape: output.shape,
@@ -309,14 +308,12 @@ impl NumericalFacts {
         &self.values[id.0]
     }
 
-    pub(super) fn operation(&self, id: OperationId) -> &Operation {
-        &self.operations[id.0]
-    }
-
+    #[cfg(test)]
     pub(super) fn entities(&self) -> &[Entity] {
         &self.entities
     }
 
+    #[cfg(test)]
     pub(super) fn values(&self) -> &[Value] {
         &self.values
     }
@@ -337,21 +334,15 @@ pub(super) enum ProofStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(super) struct Bounds {
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 transfer functions")]
     lower: Option<f64>,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 transfer functions")]
     upper: Option<f64>,
 }
 
 impl Bounds {
     pub(super) fn new(lower: Option<f64>, upper: Option<f64>) -> Self {
         Self { lower, upper }
-    }
-
-    pub(super) fn lower(&self) -> Option<f64> {
-        self.lower
-    }
-
-    pub(super) fn upper(&self) -> Option<f64> {
-        self.upper
     }
 }
 
@@ -391,9 +382,12 @@ impl ValueFacts {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct ScalarFacts {
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 transfer functions")]
     finite: ProofStatus,
     nonzero: ProofStatus,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 transfer functions")]
     positive: ProofStatus,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 transfer functions")]
     bounds: Bounds,
 }
 
@@ -420,23 +414,12 @@ impl ScalarFacts {
         }
     }
 
-    pub(super) fn finite(&self) -> ProofStatus {
-        self.finite
-    }
-
     pub(super) fn nonzero(&self) -> ProofStatus {
         self.nonzero
     }
-
-    pub(super) fn positive(&self) -> ProofStatus {
-        self.positive
-    }
-
-    pub(super) fn bounds(&self) -> Bounds {
-        self.bounds
-    }
 }
 
+#[allow(dead_code, reason = "reserved for later SPEC_0035 vector inference")]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct VectorFacts {
     all_finite: ProofStatus,
@@ -445,53 +428,27 @@ pub(super) struct VectorFacts {
     element_bounds: Bounds,
 }
 
-impl VectorFacts {
-    pub(super) fn all_finite(&self) -> ProofStatus {
-        self.all_finite
-    }
-
-    pub(super) fn zero_vector(&self) -> ProofStatus {
-        self.zero_vector
-    }
-
-    pub(super) fn unit_vector(&self) -> ProofStatus {
-        self.unit_vector
-    }
-
-    pub(super) fn element_bounds(&self) -> Bounds {
-        self.element_bounds
-    }
-}
-
+#[allow(dead_code, reason = "reserved for later SPEC_0035 banded kernels")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Bandwidth {
     lower: usize,
     upper: usize,
 }
 
-impl Bandwidth {
-    pub(super) fn new(lower: usize, upper: usize) -> Self {
-        Self { lower, upper }
-    }
-
-    pub(super) fn lower(&self) -> usize {
-        self.lower
-    }
-
-    pub(super) fn upper(&self) -> usize {
-        self.upper
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct MatrixFacts {
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 Cholesky selection")]
     symmetric: ProofStatus,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 Cholesky selection")]
     positive_definite: ProofStatus,
     upper_triangular: ProofStatus,
     lower_triangular: ProofStatus,
     invertible: ProofStatus,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 rank inference")]
     known_rank: Option<usize>,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 sparse kernels")]
     sparsity: Option<SparsityPattern>,
+    #[allow(dead_code, reason = "reserved for later SPEC_0035 banded kernels")]
     bandwidth: Option<Bandwidth>,
 }
 
@@ -509,14 +466,6 @@ impl MatrixFacts {
         }
     }
 
-    pub(super) fn symmetric(&self) -> ProofStatus {
-        self.symmetric
-    }
-
-    pub(super) fn positive_definite(&self) -> ProofStatus {
-        self.positive_definite
-    }
-
     pub(super) fn upper_triangular(&self) -> ProofStatus {
         self.upper_triangular
     }
@@ -528,33 +477,12 @@ impl MatrixFacts {
     pub(super) fn invertible(&self) -> ProofStatus {
         self.invertible
     }
-
-    pub(super) fn known_rank(&self) -> Option<usize> {
-        self.known_rank
-    }
-
-    pub(super) fn sparsity(&self) -> Option<&SparsityPattern> {
-        self.sparsity.as_ref()
-    }
-
-    pub(super) fn bandwidth(&self) -> Option<Bandwidth> {
-        self.bandwidth
-    }
 }
 
+#[allow(dead_code, reason = "reserved for later SPEC_0035 sparse kernels")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SparsityPattern {
     may_be_nonzero: Vec<bool>,
-}
-
-impl SparsityPattern {
-    pub(super) fn new(may_be_nonzero: Vec<bool>) -> Self {
-        Self { may_be_nonzero }
-    }
-
-    pub(super) fn may_be_nonzero(&self) -> &[bool] {
-        &self.may_be_nonzero
-    }
 }
 
 fn proof(value: bool) -> ProofStatus {

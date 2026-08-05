@@ -239,6 +239,15 @@ pub enum GalecTargetError {
         detail: String,
     },
 
+    /// SPEC_0035: the embedded target requested the numerical profile, but
+    /// the validated GALEC block is outside the currently implemented slice.
+    #[error("{detail} [{code}]")]
+    NumericalAnalysis {
+        code: &'static str,
+        detail: String,
+        span: Option<Span>,
+    },
+
     /// GAL-025: initial equations are a projection-scope rejection. Startup
     /// is built from manifest `start` values (plus the dependent-parameter
     /// recomputation) only, so admitting a non-empty initialization
@@ -258,7 +267,7 @@ pub enum GalecTargetError {
 impl GalecTargetError {
     /// Stable diagnostic code (SPEC_0008).
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::ContinuousDynamics { .. } => "ET001",
             Self::ExternalFunction { .. } => "ET002",
@@ -283,6 +292,7 @@ impl GalecTargetError {
             Self::InitialEquations { .. } => "ET021",
             Self::CNameCollision { .. } => "ET022",
             Self::CExportUnsupported { .. } => "ET023",
+            Self::NumericalAnalysis { code, .. } => code,
         }
     }
 
@@ -300,6 +310,7 @@ impl GalecTargetError {
             | Self::UnsupportedFeature { span, .. }
             | Self::UnknownVariableReference { span, .. }
             | Self::LoweringTypeMismatch { span, .. } => span.filter(|span| !span.is_dummy()),
+            Self::NumericalAnalysis { span, .. } => span.filter(|span| !span.is_dummy()),
             Self::ContinuousDynamics { .. }
             | Self::RuntimeEvents { .. }
             | Self::DynamicClock { .. }

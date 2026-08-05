@@ -70,6 +70,10 @@ rumoca_array_{{ value.operator }}_{{ "a" if value.lhs.kind == "array" else "s" }
 {{ padding(depth) }}rumoca_quat_integrate({{ flat_reference(value.target, value.target_dimensions) }}, {{ flat_reference(value.quaternion, value.quaternion_dimensions) }}, {{ flat_reference(value.angular_rate, value.angular_rate_dimensions) }}, {{ expr(value.sample_period) }});
 {%- elif value.kind == "quat_normalize_if" -%}
 {{ padding(depth) }}rumoca_quat_normalize_if({{ flat_reference(value.target, value.dimensions) }}, {{ flat_reference(value.quaternion, value.dimensions) }}, {{ expr(value.norm) }}, {{ expr(value.condition) }});
+{%- elif value.kind == "linear_solve" -%}
+{{ padding(depth) }}if (!rumoca_linear_solve_{{ value.algorithm }}({{ flat_reference(value.target, value.target_dimensions) }}, {{ flat_reference(value.matrix, value.matrix_dimensions) }}, {{ flat_reference(value.rhs, value.rhs_dimensions) }}, {{ value.size }})) {
+{{ padding(depth + 1) }}self->error_signal_status |= UINT32_C(1) << 3;
+{{ padding(depth) }}}
 {%- elif value.kind == "if" -%}
 {%- for branch in value.branches %}
 {{ padding(depth) }}{% if loop.first %}if{% else %}else if{% endif %} ({{ expr(branch.condition) }}) {
@@ -231,9 +235,98 @@ RUMOCA_MAYBE_UNUSED static inline void rumoca_array_div_sa(
     double *out, double lhs, const double *rhs, size_t count) {
     for (size_t i = 0; i < count; ++i) out[i] = lhs / rhs[i];
 }
+RUMOCA_MAYBE_UNUSED static inline bool rumoca_linear_solve_diagonal(
+    double *out, const double *matrix, const double *rhs, size_t size) {
+    for (size_t row = 0; row < size; ++row) {
+        const double diagonal = matrix[row * size + row];
+        if (diagonal == 0.0 || isnan(diagonal)) return false;
+        out[row] = rhs[row] / diagonal;
+    }
+    return true;
+}
+RUMOCA_MAYBE_UNUSED static inline bool rumoca_linear_solve_forward(
+    double *out, const double *matrix, const double *rhs, size_t size) {
+    for (size_t row = 0; row < size; ++row) {
+        double value = rhs[row];
+        for (size_t column = 0; column < row; ++column) {
+            value -= matrix[row * size + column] * out[column];
+        }
+        const double diagonal = matrix[row * size + row];
+        if (diagonal == 0.0 || isnan(diagonal)) return false;
+        out[row] = value / diagonal;
+    }
+    return true;
+}
+RUMOCA_MAYBE_UNUSED static inline bool rumoca_linear_solve_backward(
+    double *out, const double *matrix, const double *rhs, size_t size) {
+    for (size_t row = size; row-- > 0;) {
+        double value = rhs[row];
+        for (size_t column = row + 1; column < size; ++column) {
+            value -= matrix[row * size + column] * out[column];
+        }
+        const double diagonal = matrix[row * size + row];
+        if (diagonal == 0.0 || isnan(diagonal)) return false;
+        out[row] = value / diagonal;
+    }
+    return true;
+}
+RUMOCA_MAYBE_UNUSED static inline bool rumoca_linear_solve_generic_pivoted(
+    double *out, const double *matrix, const double *rhs, size_t size) {
+    if (size == 0) return false;
+    double work_matrix[size * size];
+    memcpy(work_matrix, matrix, sizeof(work_matrix));
+    memcpy(out, rhs, size * sizeof(*out));
+    for (size_t column = 0; column < size; ++column) {
+        size_t pivot = column;
+        double pivot_abs = fabs(work_matrix[column * size + column]);
+        for (size_t row = column + 1; row < size; ++row) {
+            const double candidate = fabs(work_matrix[row * size + column]);
+            if (candidate > pivot_abs) {
+                pivot = row;
+                pivot_abs = candidate;
+            }
+        }
+        if (pivot_abs == 0.0 || isnan(pivot_abs)) return false;
+        if (pivot != column) {
+            for (size_t entry = column; entry < size; ++entry) {
+                const size_t lhs = column * size + entry;
+                const size_t rhs_index = pivot * size + entry;
+                const double temporary = work_matrix[lhs];
+                work_matrix[lhs] = work_matrix[rhs_index];
+                work_matrix[rhs_index] = temporary;
+            }
+            const double temporary = out[column];
+            out[column] = out[pivot];
+            out[pivot] = temporary;
+        }
+        const double diagonal = work_matrix[column * size + column];
+        for (size_t row = column + 1; row < size; ++row) {
+            const double factor = work_matrix[row * size + column] / diagonal;
+            work_matrix[row * size + column] = 0.0;
+            for (size_t entry = column + 1; entry < size; ++entry) {
+                work_matrix[row * size + entry] -=
+                    factor * work_matrix[column * size + entry];
+            }
+            out[row] -= factor * out[column];
+        }
+    }
+    for (size_t row = size; row-- > 0;) {
+        double value = out[row];
+        for (size_t column = row + 1; column < size; ++column) {
+            value -= work_matrix[row * size + column] * out[column];
+        }
+        const double diagonal = work_matrix[row * size + row];
+        if (diagonal == 0.0 || isnan(diagonal)) return false;
+        out[row] = value / diagonal;
+    }
+    return true;
+}
 
 void {{ function_prefix }}_startup({{ struct_name }} *self) {
     (void)self;
+{%- if has_error_signal_status|default(false) %}
+    self->error_signal_status = UINT32_C(0);
+{%- endif %}
 {%- for item in methods.startup %}
 {{ statement(item, 1) }}
 {%- endfor %}
@@ -241,6 +334,9 @@ void {{ function_prefix }}_startup({{ struct_name }} *self) {
 
 void {{ function_prefix }}_recalibrate({{ struct_name }} *self) {
     (void)self;
+{%- if has_error_signal_status|default(false) %}
+    self->error_signal_status = UINT32_C(0);
+{%- endif %}
 {%- for item in methods.recalibrate %}
 {{ statement(item, 1) }}
 {%- endfor %}
@@ -248,6 +344,9 @@ void {{ function_prefix }}_recalibrate({{ struct_name }} *self) {
 
 void {{ function_prefix }}_dostep({{ struct_name }} *self) {
     (void)self;
+{%- if has_error_signal_status|default(false) %}
+    self->error_signal_status = UINT32_C(0);
+{%- endif %}
 {%- for item in methods.do_step %}
 {{ statement(item, 1) }}
 {%- endfor %}

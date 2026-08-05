@@ -4,7 +4,7 @@ use rumoca_core::{Diagnostic, PhaseError, PrimaryLabel, Span};
 
 /// Errors produced while building numerical facts from a validated GALEC block.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub(super) enum NumericalAnalysisError {
+pub(crate) enum NumericalAnalysisError {
     /// The first embedded numerical profile handles only primitive values.
     #[error(
         "entity `{entity}` has state-compartment type `{compartment}`; state-compartment values are not yet supported by numerical analysis"
@@ -125,6 +125,15 @@ impl NumericalAnalysisError {
             Self::UnsupportedReference { .. } => "unsupported reference shape",
             Self::UnknownEntityReference { .. } => "unresolved numerical reference",
             Self::InvalidOperation { .. } => "invalid operation metadata",
+        }
+    }
+
+    pub(crate) fn into_target_error(self) -> crate::diagnostic::GalecTargetError {
+        let span = self.span();
+        crate::diagnostic::GalecTargetError::NumericalAnalysis {
+            code: self.code(),
+            detail: self.to_string(),
+            span: (!span.is_dummy()).then_some(span),
         }
     }
 }
