@@ -124,7 +124,13 @@ pub fn render_target_files(
     }
 
     if matches!(manifest.name.as_deref(), Some("galec" | "galec-production")) {
-        return render_galec_efmu_target_files(result, &bundle, &manifest, &model_identifier);
+        return render_galec_efmu_target_files(
+            result,
+            &bundle,
+            &manifest,
+            &model_identifier,
+            model,
+        );
     }
 
     let renderer = resolve_manifest_renderer(result, &manifest, &model_identifier)?;
@@ -403,6 +409,9 @@ fn compile_manifest_target(
     output: Option<PathBuf>,
 ) -> Result<()> {
     ensure_target_has_rendered_files(manifest)?;
+    // For GALEC targets, fold hidden algebraic component outputs before the
+    // capability gate and GALEC projection so residual continuous equations
+    // from component-local algebraic aliases do not trigger a false rejection.
     validate_target_requirements(result, manifest)?;
 
     let model_identifier = model.replace('.', "_");
@@ -412,15 +421,27 @@ fn compile_manifest_target(
     // package the two eFMU forms (contract §9 WI-5) — a path distinct from the
     // generic `ManifestRenderer` targets below.
     if manifest.build == Some(TargetBuildKind::Efmu) {
-        return compile_efmu_target(result, &bundle, &manifest, output, &model_identifier);
+        return compile_efmu_target(result, bundle, manifest, output, &model_identifier, model);
     }
 
     if manifest.name.as_deref() == Some("embedded-c-galec") {
-        return compile_embedded_c_galec_target(result, bundle, manifest, output, &model_identifier);
+        return compile_embedded_c_galec_target(
+            result,
+            bundle,
+            manifest,
+            output,
+            &model_identifier,
+        );
     }
 
     if manifest.name.as_deref() == Some("embedded-rust-galec") {
-        return compile_embedded_rust_galec_target(result, bundle, manifest, output, &model_identifier);
+        return compile_embedded_rust_galec_target(
+            result,
+            bundle,
+            manifest,
+            output,
+            &model_identifier,
+        );
     }
 
     // Resolved before any filesystem effect: a renderer-level rejection
@@ -472,10 +493,14 @@ fn compile_manifest_target(
 fn build_galec_plan_for(
     galec: &rumoca_galec::galec::Galec,
     manifest: &TargetManifest,
+    source_name: &str,
 ) -> Result<rumoca_galec::manifest::GalecPlan> {
+    let tool = format!("rumoca {}", env!("CARGO_PKG_VERSION"));
     match manifest.name.as_deref() {
-        Some("galec") => rumoca_galec::manifest::GalecPlan::new_ac(galec),
-        Some("galec-production") => rumoca_galec::manifest::GalecPlan::new_production(galec),
+        Some("galec") => rumoca_galec::manifest::GalecPlan::new_ac(galec, source_name, &tool),
+        Some("galec-production") => {
+            rumoca_galec::manifest::GalecPlan::new_production(galec, source_name, &tool)
+        }
         other => bail!(
             "build = \"efmu\" target '{}' is not a known GALEC eFMU target",
             other.unwrap_or("custom")
@@ -488,18 +513,22 @@ fn galec_analyze_and_transform(
     result: &CompilationResult,
     model_identifier: &str,
 ) -> Result<rumoca_galec::galec::Galec> {
-    let analysis = rumoca_galec::analysis::analyze(&result.dae)
-        .map_err(|errs| {
-            let msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
-            anyhow::anyhow!("GALEC admissibility check failed:\n{}", msgs.join("\n"))
-        })?;
+    // Fold hidden algebraic component outputs so the admissibility check and
+    // transformation see a purely discrete DAE.
+    let mut dae = result.dae.clone();
+    rumoca_compile::analysis::fold_hidden_component_outputs_for_projection(&mut dae);
+    let analysis = rumoca_galec::analysis::analyze(&dae).map_err(|errs| {
+        let msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+        anyhow::anyhow!("GALEC admissibility check failed:\n{}", msgs.join("\n"))
+    })?;
     let galec = rumoca_galec::transformation::transform(
         rumoca_galec::transformation::TransformationInput {
-            dae: &result.dae,
+            dae: &dae,
             analysis,
             model_name: model_identifier.to_string(),
         },
-    );
+    )
+    .map_err(|e| anyhow::anyhow!("GALEC transformation failed: {e}"))?;
     Ok(galec)
 }
 
@@ -542,9 +571,10 @@ fn render_galec_efmu_target_files(
     bundle: &TargetBundle,
     manifest: &TargetManifest,
     model_identifier: &str,
+    source_name: &str,
 ) -> Result<Vec<RenderedTargetFile>> {
     let galec = galec_analyze_and_transform(result, model_identifier)?;
-    let plan = build_galec_plan_for(&galec, manifest)?;
+    let plan = build_galec_plan_for(&galec, manifest, source_name)?;
     let render = galec_manifest_render(&plan, bundle, model_identifier);
     crate::packaging::render_web_files(&manifest.files, render)
 }
@@ -558,10 +588,10 @@ fn compile_embedded_c_galec_target(
     model_identifier: &str,
 ) -> Result<()> {
     let galec = galec_analyze_and_transform(result, model_identifier)?;
-    let header = rumoca_galec::render::render_c_header(&galec)
-        .context("render embedded-c-galec header")?;
-    let source = rumoca_galec::render::render_c_source(&galec)
-        .context("render embedded-c-galec source")?;
+    let header =
+        rumoca_galec::render::render_c_header(&galec).context("render embedded-c-galec header")?;
+    let source =
+        rumoca_galec::render::render_c_source(&galec).context("render embedded-c-galec source")?;
 
     let out_dir = output.unwrap_or_else(|| default_target_output_dir(manifest, model_identifier));
     std::fs::create_dir_all(&out_dir)?;
@@ -594,8 +624,8 @@ fn compile_embedded_rust_galec_target(
     model_identifier: &str,
 ) -> Result<()> {
     let galec = galec_analyze_and_transform(result, model_identifier)?;
-    let source = rumoca_galec::render::render_rust(&galec)
-        .context("render embedded-rust-galec source")?;
+    let source =
+        rumoca_galec::render::render_rust(&galec).context("render embedded-rust-galec source")?;
 
     let out_dir = output.unwrap_or_else(|| default_target_output_dir(manifest, model_identifier));
     std::fs::create_dir_all(&out_dir)?;
@@ -634,6 +664,7 @@ fn compile_efmu_target(
     manifest: &TargetManifest,
     output: Option<PathBuf>,
     model_identifier: &str,
+    source_name: &str,
 ) -> Result<()> {
     for file in &manifest.files {
         if file.mode.is_some() {
@@ -646,7 +677,7 @@ fn compile_efmu_target(
     }
     let galec = galec_analyze_and_transform(result, model_identifier)
         .context("GALEC projection for eFMU target")?;
-    let plan = build_galec_plan_for(&galec, manifest)?;
+    let plan = build_galec_plan_for(&galec, manifest, source_name)?;
     let out_dir = output.unwrap_or_else(|| default_target_output_dir(manifest, model_identifier));
 
     eprintln!(
@@ -702,6 +733,13 @@ fn write_manifest_files(
     Ok(())
 }
 
+fn is_galec_manifest(manifest: &TargetManifest) -> bool {
+    matches!(
+        manifest.name.as_deref(),
+        Some("galec" | "galec-production" | "embedded-c-galec" | "embedded-rust-galec")
+    )
+}
+
 fn validate_target_requirements(
     result: &CompilationResult,
     manifest: &TargetManifest,
@@ -709,7 +747,19 @@ fn validate_target_requirements(
     let Some(capabilities) = &manifest.capabilities else {
         return Ok(());
     };
-    validate_dae_target_capabilities(&result.dae, manifest, capabilities)?;
+    // For GALEC targets, fold hidden algebraic component outputs before the
+    // capability gate so residual continuous equations from component-local
+    // algebraic aliases do not trigger a false rejection.
+    let folded_dae;
+    let dae = if is_galec_manifest(manifest) {
+        let mut d = result.dae.clone();
+        rumoca_compile::analysis::fold_hidden_component_outputs_for_projection(&mut d);
+        folded_dae = d;
+        &folded_dae
+    } else {
+        &result.dae
+    };
+    validate_dae_target_capabilities(dae, manifest, capabilities)?;
     if manifest.ir == TargetTemplateIr::Solve {
         validate_solve_target_capabilities(result, manifest, capabilities)?;
     }

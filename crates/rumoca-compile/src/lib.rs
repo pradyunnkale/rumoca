@@ -43,6 +43,7 @@ pub mod cache;
 mod codegen_api;
 mod codegen_target;
 mod experiment;
+mod galec_api;
 mod instrumentation;
 #[cfg(test)]
 mod instrumentation_tests;
@@ -156,11 +157,21 @@ pub mod codegen {
     }
 }
 
+/// Identity-free GALEC render facade (shared by LSP and WASM addon).
+pub mod galec {
+    pub use crate::galec_api::{
+        EMBEDDED_C_GALEC_TARGET, GALEC_PRODUCTION_TARGET, GALEC_TARGET, GalecRenderError,
+        GalecSources, is_galec_target, render_galec_sources,
+    };
+}
 
 /// Read-only DAE analysis helpers exposed through the compile facade.
 pub mod analysis {
     pub use rumoca_phase_dae::balance::BalanceDetail;
-    pub use rumoca_phase_dae::{balance, balance_detail, equations_unknowns, is_balanced};
+    pub use rumoca_phase_dae::{
+        balance, balance_detail, equations_unknowns, fold_hidden_component_outputs_for_projection,
+        is_balanced,
+    };
 }
 
 /// Structural-analysis primitives (BLT sorting, scalarization).

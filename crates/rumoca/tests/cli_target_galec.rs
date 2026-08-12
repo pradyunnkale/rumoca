@@ -78,7 +78,9 @@ fn parse_manifest_id(s: &str) -> Result<(), String> {
         && parts[2].len() == 4
         && parts[3].len() == 4
         && parts[4].len() == 12
-        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+        && parts
+            .iter()
+            .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
     {
         Ok(())
     } else {
@@ -91,7 +93,9 @@ fn parse_utc_timestamp(s: &str) -> Result<(), String> {
         return Err(format!("timestamp must end with Z for UTC, got {s:?}"));
     }
     if !s.contains('T') {
-        return Err(format!("timestamp must contain 'T' date/time separator, got {s:?}"));
+        return Err(format!(
+            "timestamp must contain 'T' date/time separator, got {s:?}"
+        ));
     }
     Ok(())
 }
@@ -313,8 +317,7 @@ fn container_ids_unique_and_generation_metadata_strict() {
         manifest_ref_id, manifest_id,
         "__content.xml manifestRefId must be the manifest's own root id"
     );
-    parse_manifest_id(&manifest_ref_id)
-        .expect("manifestRefId must be a brace-wrapped UUID");
+    parse_manifest_id(&manifest_ref_id).expect("manifestRefId must be a brace-wrapped UUID");
 
     for path in [container.content_xml(), container.manifest_xml()] {
         let timestamp = sole_attribute_value(&path, "generationDateAndTime");

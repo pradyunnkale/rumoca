@@ -29,9 +29,13 @@ fn new_uuid() -> String {
 }
 
 fn utc_now() -> String {
+    // XSD pattern `[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z` forbids
+    // fractional seconds, so truncate to whole seconds before formatting.
+    let now = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
     use time::format_description::well_known::Rfc3339;
-    time::OffsetDateTime::now_utc()
-        .format(&Rfc3339)
+    now.format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
@@ -61,8 +65,8 @@ fn block_causality(role: &DataRole) -> &'static str {
         DataRole::Output => "output",
         DataRole::State => "state",
         DataRole::Constant => "constant",
-        DataRole::TunableParameter => "tunable-parameter",
-        DataRole::DependentParameter => "dependent-parameter",
+        DataRole::TunableParameter => "tunableParameter",
+        DataRole::DependentParameter => "dependentParameter",
     }
 }
 
@@ -167,7 +171,10 @@ pub struct GalecPlan {
     c_header: String,
     c_source: String,
     model_name: String,
-    period: f64,
+    /// Original dotted model name (e.g. `Pkg.Inner`) for `Content/@name`.
+    /// Distinct from `model_name` which uses underscores for code identifiers.
+    source_name: String,
+    generation_tool: String,
     vars: Vec<Var>,
     prev_vars: Vec<(String, &'static str)>,
     generated_at: String,
@@ -179,17 +186,41 @@ pub struct GalecPlan {
 
 impl GalecPlan {
     /// Build an Algorithm Code-only plan (for the `galec` target).
-    pub fn new_ac(galec: &Galec) -> Result<Self, Error> {
+    ///
+    /// `source_name` is the original dotted Modelica name (e.g. `Pkg.Inner`)
+    /// used for `Content/@name`; `galec.name` is the underscore identifier
+    /// used for code and the AC manifest.
+    pub fn new_ac(galec: &Galec, source_name: &str, generation_tool: &str) -> Result<Self, Error> {
         let alg = render(galec)?;
-        Ok(Self::build(galec, alg, String::new(), String::new(), false))
+        Ok(Self::build(
+            galec,
+            alg,
+            String::new(),
+            String::new(),
+            false,
+            source_name,
+            generation_tool,
+        ))
     }
 
     /// Build an Algorithm Code + Production Code plan (for `galec-production`).
-    pub fn new_production(galec: &Galec) -> Result<Self, Error> {
+    pub fn new_production(
+        galec: &Galec,
+        source_name: &str,
+        generation_tool: &str,
+    ) -> Result<Self, Error> {
         let alg = render(galec)?;
         let c_header = render_c_header(galec)?;
         let c_source = render_c_source(galec)?;
-        Ok(Self::build(galec, alg, c_header, c_source, true))
+        Ok(Self::build(
+            galec,
+            alg,
+            c_header,
+            c_source,
+            true,
+            source_name,
+            generation_tool,
+        ))
     }
 
     fn build(
@@ -198,13 +229,16 @@ impl GalecPlan {
         c_header: String,
         c_source: String,
         with_production: bool,
+        source_name: &str,
+        generation_tool: &str,
     ) -> Self {
         GalecPlan {
             alg,
             c_header,
             c_source,
             model_name: galec.name.clone(),
-            period: galec.period,
+            source_name: source_name.to_string(),
+            generation_tool: generation_tool.to_string(),
             vars: galec
                 .variables
                 .iter()
@@ -250,14 +284,14 @@ impl GalecPlan {
         }
     }
 
-    fn attrs(&self, id: &str) -> Value {
+    fn attrs(&self, id: &str, name: &str) -> Value {
         json!({
             "id": id,
-            "name": self.model_name,
+            "name": name,
             "description": null,
             "version": null,
             "generation_date_and_time": self.generated_at,
-            "generation_tool": "rumoca",
+            "generation_tool": self.generation_tool,
             "copyright": null,
             "license": null,
         })
@@ -265,25 +299,54 @@ impl GalecPlan {
 
     fn ac_ctx(&self, checksums: &BTreeMap<String, String>) -> Value {
         let alg_sha1 = checksums.get("alg_sha1").map_or("", String::as_str);
-        let period_str = format_f64(self.period);
-        let mut variables = vec![json!({
-            "kind": "Real", "id": "V_SAMPLE_PERIOD", "name": "samplePeriod",
-            "description": null, "block_causality": "constant", "dimensions": [],
-            "start": period_str, "annotations": [], "unit_ref_id": null,
-            "relative_quantity": false, "min": null, "max": null, "nominal": null,
-        })];
-        variables.extend(self.vars.iter().map(Var::to_ac_var));
+        // The clock variable is the constant that carries the sample period.
+        // Use its actual manifest ID so the <Clock> element and the variable
+        // list are consistent without a separate hardcoded V_SAMPLE_PERIOD slot.
+        let clock_var_id = self
+            .vars
+            .iter()
+            .find(|v| v.causality == "constant")
+            .map(|v| v.ac_id())
+            .unwrap_or_else(|| "V_SAMPLE_PERIOD".to_string());
+        let mut variables: Vec<Value> = self.vars.iter().map(Var::to_ac_var).collect();
+        // Add a manifest State variable for each previous-value slot.
+        // These appear as `previous(x)` in the GALEC block interface and are
+        // distinct from the user-facing output/state variable they shadow.
+        for (i, (pname, td)) in self.prev_vars.iter().enumerate() {
+            let kind = if *td == "TD_I32" { "Integer" } else { "Real" };
+            let start_val = self
+                .vars
+                .iter()
+                .find(|v| v.name == *pname)
+                .and_then(|v| v.start.as_deref())
+                .unwrap_or("0.0");
+            variables.push(json!({
+                "kind": kind,
+                "id": format!("V_PREV_{i}"),
+                "name": format!("previous({})", pname),
+                "description": null,
+                "block_causality": "state",
+                "dimensions": [],
+                "start": start_val,
+                "annotations": [],
+                "unit_ref_id": null,
+                "relative_quantity": false,
+                "min": null,
+                "max": null,
+                "nominal": null,
+            }));
+        }
         json!({
             "ac": {
-                "attributes": self.attrs(&self.ac_manifest_id),
+                "attributes": self.attrs(&self.ac_manifest_id, &self.model_name),
                 "file_ref_id": "F_ALG",
                 "files": [{
                     "id": "F_ALG",
                     "name": format!("{}.alg", self.model_name),
-                    "path": "", "needs_checksum": true, "checksum": alg_sha1,
+                    "path": "./", "needs_checksum": true, "checksum": alg_sha1,
                     "role": "Code", "description": null,
                 }],
-                "clock": { "id": "CLK", "variable_ref_id": "V_SAMPLE_PERIOD" },
+                "clock": { "id": "CLK", "variable_ref_id": clock_var_id },
                 "block_methods": {
                     "startup": { "id": "BM_STARTUP", "kind": "Startup", "signals": [] },
                     "recalibrate": { "id": "BM_RECALIBRATE", "kind": "Recalibrate", "signals": [] },
@@ -314,7 +377,7 @@ impl GalecPlan {
         }
         json!({
             "content": {
-                "attributes": self.attrs(&self.content_id),
+                "attributes": self.attrs(&self.content_id, &self.source_name),
                 "active_fmu": null,
                 "representations": representations,
             }
@@ -327,7 +390,7 @@ impl GalecPlan {
         let c_sha1 = checksums.get("c_source_sha1").map_or("", String::as_str);
         json!({
             "pc": {
-                "attributes": self.attrs(&self.pc_manifest_id),
+                "attributes": self.attrs(&self.pc_manifest_id, &self.model_name),
                 "manifest_reference": {
                     "id": "MR_AC",
                     "manifest_ref_id": self.ac_manifest_id,
@@ -344,12 +407,12 @@ impl GalecPlan {
         json!([
             {
                 "id": "F_H", "name": format!("{}.h", self.model_name),
-                "path": "", "needs_checksum": true, "checksum": h_sha1,
+                "path": "./", "needs_checksum": true, "checksum": h_sha1,
                 "role": "Code", "description": null,
             },
             {
                 "id": "F_C", "name": format!("{}.c", self.model_name),
-                "path": "", "needs_checksum": true, "checksum": c_sha1,
+                "path": "./", "needs_checksum": true, "checksum": c_sha1,
                 "role": "Code", "description": null,
             },
         ])
@@ -365,7 +428,7 @@ impl GalecPlan {
             "target_types": [
                 { "id": "TT_VOID", "kind": "efmiVoid",    "coded_type": "void"    },
                 { "id": "TT_F64",  "kind": "efmiFloat64", "coded_type": "double"  },
-                { "id": "TT_I32",  "kind": "efmiInt32",   "coded_type": "int32_t" },
+                { "id": "TT_I32",  "kind": "efmiInteger32", "coded_type": "int32_t" },
                 { "id": "TT_BOOL", "kind": "efmiBool",    "coded_type": "bool"    },
             ],
             "code_files": [
@@ -416,19 +479,39 @@ impl GalecPlan {
     fn build_functions(&self) -> Vec<Value> {
         let n = &self.model_name;
         vec![
-            build_fn_entry("FN_STARTUP", &format!("{n}_startup"), "RP_STARTUP", "FP_STARTUP"),
+            build_fn_entry(
+                "FN_STARTUP",
+                &format!("{n}_startup"),
+                "RP_STARTUP",
+                "FP_STARTUP",
+            ),
             build_fn_entry(
                 "FN_RECALIBRATE",
                 &format!("{n}_recalibrate"),
                 "RP_RECALIBRATE",
                 "FP_RECALIBRATE",
             ),
-            build_fn_entry("FN_DOSTEP", &format!("{n}_dostep"), "RP_DOSTEP", "FP_DOSTEP"),
+            build_fn_entry(
+                "FN_DOSTEP",
+                &format!("{n}_dostep"),
+                "RP_DOSTEP",
+                "FP_DOSTEP",
+            ),
         ]
     }
 
     fn build_logical_data(&self) -> (Vec<Value>, Vec<Value>) {
-        let data_refs = self.vars.iter().map(Var::to_data_ref).collect();
+        let mut data_refs: Vec<Value> = self.vars.iter().map(Var::to_data_ref).collect();
+        // Mirror the AC manifest's V_PREV_i entries with PC data references
+        // pointing at the <name>_prev C struct fields.
+        for (i, (pname, _)) in self.prev_vars.iter().enumerate() {
+            data_refs.push(json!({
+                "manifest_reference_ref_id": "MR_AC",
+                "foreign_ref_id": format!("V_PREV_{i}"),
+                "formal_parameter_ref_id": "FP_DOSTEP",
+                "component_identifier": format!("{pname}_prev"),
+            }));
+        }
         let func_refs = vec![
             json!({ "manifest_reference_ref_id": "MR_AC", "foreign_ref_id": "BM_STARTUP",    "function_ref_id": "FN_STARTUP"    }),
             json!({ "manifest_reference_ref_id": "MR_AC", "foreign_ref_id": "BM_RECALIBRATE","function_ref_id": "FN_RECALIBRATE" }),

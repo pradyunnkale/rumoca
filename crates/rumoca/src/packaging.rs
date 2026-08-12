@@ -609,9 +609,9 @@ template = "root-template"
         .expect("declarative package build should succeed");
 
         let leaf_bytes = std::fs::read(out_dir.join("leaf.txt")).expect("leaf written");
-        let expected = Sha1Hex::of_bytes(&leaf_bytes);
+        let expected = format!("{:x}", Sha1::digest(&leaf_bytes));
         let root = std::fs::read_to_string(out_dir.join("root.txt")).expect("root written");
-        assert_eq!(root, format!("root sees leaf={}", expected.as_str()));
+        assert_eq!(root, format!("root sees leaf={}", expected));
         let license =
             std::fs::read_to_string(out_dir.join("schemas/LICENSE")).expect("asset copied");
         assert_eq!(license, "license bytes");

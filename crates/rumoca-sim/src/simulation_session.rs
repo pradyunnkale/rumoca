@@ -221,10 +221,7 @@ impl SimulationSessionApi for SimulationSession {
         Self::get(self, name)
     }
 
-    fn values_for(
-        &self,
-        names: &[String],
-    ) -> Result<Option<IndexMap<String, f64>>, Self::Error> {
+    fn values_for(&self, names: &[String]) -> Result<Option<IndexMap<String, f64>>, Self::Error> {
         match &self.inner {
             #[cfg(feature = "solver-diffsol")]
             SimulationSessionInner::Diffsol(session) => session

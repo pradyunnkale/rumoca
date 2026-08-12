@@ -269,7 +269,7 @@ fn generate_kalman_target(file: &Path, target: &str, out_dir: &Path) {
 }
 
 fn compile_kalman_rust(rs_file: &Path, out_dir: &Path) {
-    let content = fs::read_to_string(&rs_file).expect("read generated Rust");
+    let content = fs::read_to_string(rs_file).expect("read generated Rust");
     let rlib = out_dir.join("libkalman.rlib");
     let compile = Command::new("rustc")
         .arg("--edition")

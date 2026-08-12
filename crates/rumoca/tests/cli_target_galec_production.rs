@@ -257,7 +257,9 @@ fn parse_manifest_id(s: &str) -> Result<(), String> {
         && parts[2].len() == 4
         && parts[3].len() == 4
         && parts[4].len() == 12
-        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+        && parts
+            .iter()
+            .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
     {
         Ok(())
     } else {
@@ -270,7 +272,9 @@ fn parse_utc_timestamp(s: &str) -> Result<(), String> {
         return Err(format!("timestamp must end with Z for UTC, got {s:?}"));
     }
     if !s.contains('T') {
-        return Err(format!("timestamp must contain 'T' date/time separator, got {s:?}"));
+        return Err(format!(
+            "timestamp must contain 'T' date/time separator, got {s:?}"
+        ));
     }
     Ok(())
 }

@@ -1,9 +1,9 @@
 // analyze.rs, produces facts and accepts/rejects models based on GALEC standard
 
 // temp until the upstream irs are fixed to include a guard field
+use super::errors::AdmissibilityError;
 use rumoca_core::{BuiltinFunction, Expression, ExpressionVisitor, Reference, Subscript};
 use rumoca_ir_dae::{Dae, Equation, VariableOrigin};
-use super::errors::AdmissibilityError;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct AnalysisResult {
@@ -23,17 +23,24 @@ pub fn analyze(dae: &Dae) -> Result<AnalysisResult, Vec<AdmissibilityError>> {
         .map(|v| v.name.to_string())
         .collect();
 
-    let equations: Vec<&Equation> = dae.discrete.real_updates.iter()
+    let equations: Vec<&Equation> = dae
+        .discrete
+        .real_updates
+        .iter()
         .chain(dae.discrete.valued_updates.iter())
-        .filter(|eq| eq.lhs.as_ref().map(|lhs| source_vars.contains(&lhs.to_string())).unwrap_or(false))
+        .filter(|eq| {
+            eq.lhs
+                .as_ref()
+                .map(|lhs| source_vars.contains(&lhs.to_string()))
+                .unwrap_or(false)
+        })
         .collect();
 
-    let order = topological_sort_discrete(&equations)
-        .map_err(|e| vec![e])?;
+    let order = topological_sort_discrete(&equations).map_err(|e| vec![e])?;
 
     let groups = build_groups(&order, &equations);
 
-    Ok(AnalysisResult {groups})
+    Ok(AnalysisResult { groups })
 }
 
 pub struct StatementGroup {
@@ -47,22 +54,42 @@ macro_rules! push_error_if {
     ($errors:expr, $ok:expr, $variant:expr) => {
         if !$ok {
             $errors.push($variant);
-        } 
+        }
     };
 }
 
 pub fn check_admissibility(dae: &Dae) -> Result<(), Vec<AdmissibilityError>> {
-    let mut errors: Vec<AdmissibilityError> = Vec::new(); 
+    let mut errors: Vec<AdmissibilityError> = Vec::new();
 
-    push_error_if!(errors, dae.variables.states.is_empty(), AdmissibilityError::HasContinuousStates);
-    push_error_if!(errors, dae.continuous.equations.is_empty(), AdmissibilityError::HasContinuousEquations);
-    push_error_if!(errors, dae.variables.algebraics.is_empty(), AdmissibilityError::HasAlgebraicVariables);
-    push_error_if!(errors, dae.events.event_actions.is_empty(), AdmissibilityError::HasRuntimeEvents);
-    push_error_if!(errors, dae.clocks.triggered_conditions.is_empty(), AdmissibilityError::HasDynamicClocks);
-    
+    push_error_if!(
+        errors,
+        dae.variables.states.is_empty(),
+        AdmissibilityError::HasContinuousStates
+    );
+    push_error_if!(
+        errors,
+        dae.continuous.equations.is_empty(),
+        AdmissibilityError::HasContinuousEquations
+    );
+    push_error_if!(
+        errors,
+        dae.variables.algebraics.is_empty(),
+        AdmissibilityError::HasAlgebraicVariables
+    );
+    push_error_if!(
+        errors,
+        dae.events.event_actions.is_empty(),
+        AdmissibilityError::HasRuntimeEvents
+    );
+    push_error_if!(
+        errors,
+        dae.clocks.triggered_conditions.is_empty(),
+        AdmissibilityError::HasDynamicClocks
+    );
+
     match dae.clocks.schedules.len() {
         0 => errors.push(AdmissibilityError::NoClock),
-        1 => {},
+        1 => {}
         n => errors.push(AdmissibilityError::MultiRate { count: n }),
     }
 
@@ -91,12 +118,16 @@ impl ExpressionVisitor for ReadCollector {
 }
 
 fn collect_reads(expr: &Expression) -> HashSet<String> {
-    let mut collector = ReadCollector { reads: HashSet::new() };
+    let mut collector = ReadCollector {
+        reads: HashSet::new(),
+    };
     collector.visit_expression(expr);
     collector.reads
 }
 
-pub fn topological_sort_discrete(equations: &[&Equation]) -> Result<Vec<StatementId>, AdmissibilityError> {
+pub fn topological_sort_discrete(
+    equations: &[&Equation],
+) -> Result<Vec<StatementId>, AdmissibilityError> {
     let n = equations.len();
 
     let mut writer: HashMap<String, usize> = HashMap::new();
@@ -112,18 +143,17 @@ pub fn topological_sort_discrete(equations: &[&Equation]) -> Result<Vec<Statemen
 
     for (i, eq) in equations.iter().enumerate() {
         for var in collect_reads(&eq.rhs) {
-            if let Some(&j) = writer.get(&var) {
-                if j != i && seen_edges.insert((j, i)) {
-                    adj[j].push(i);
-                    in_degree[i] += 1;
-                }
+            if let Some(&j) = writer.get(&var)
+                && j != i
+                && seen_edges.insert((j, i))
+            {
+                adj[j].push(i);
+                in_degree[i] += 1;
             }
         }
     }
 
-    let mut queue: VecDeque<usize> = (0..n)
-        .filter(|&i| in_degree[i] == 0)
-        .collect();
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
 
     let mut order: Vec<StatementId> = Vec::with_capacity(n);
 
@@ -145,12 +175,18 @@ pub fn topological_sort_discrete(equations: &[&Equation]) -> Result<Vec<Statemen
 }
 
 fn extract_condition(rhs: &Expression) -> Option<Expression> {
-    if let Expression::If { branches, else_branch, .. } = rhs {
-        if let Expression::BuiltinCall { function: BuiltinFunction::Pre, .. } = else_branch.as_ref() {
-            if let Some((cond, _)) = branches.first() {
-                return Some(cond.clone());
-            }
-        }
+    if let Expression::If {
+        branches,
+        else_branch,
+        ..
+    } = rhs
+        && let Expression::BuiltinCall {
+            function: BuiltinFunction::Pre,
+            ..
+        } = else_branch.as_ref()
+        && let Some((cond, _)) = branches.first()
+    {
+        return Some(cond.clone());
     }
     None
 }
@@ -161,12 +197,17 @@ fn build_groups(order: &[StatementId], equations: &[&Equation]) -> Vec<Statement
     for id in order {
         let condition = extract_condition(&equations[id.0].rhs);
 
-        let same = groups.last()
+        let same = groups
+            .last()
             .map(|g| g.condition == condition)
             .unwrap_or(false);
 
         if same {
-            groups.last_mut().unwrap().statements.push(StatementId(id.0));
+            groups
+                .last_mut()
+                .unwrap()
+                .statements
+                .push(StatementId(id.0));
         } else {
             groups.push(StatementGroup {
                 condition,
@@ -181,8 +222,8 @@ fn build_groups(order: &[StatementId], equations: &[&Equation]) -> Vec<Statement
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rumoca_core::{BuiltinFunction, Expression, Literal, Reference, Span};
     use rumoca_core::VarName;
+    use rumoca_core::{BuiltinFunction, Expression, Literal, Reference, Span};
     use rumoca_ir_dae::{ClockSchedule, Dae, Equation, Variable};
 
     fn dummy_span() -> Span {
@@ -273,9 +314,14 @@ mod tests {
     #[test]
     fn admissibility_rejects_continuous_states() {
         let mut dae = make_admissible_dae();
-        dae.variables.states.insert(VarName::new("x"), make_var("x"));
+        dae.variables
+            .states
+            .insert(VarName::new("x"), make_var("x"));
         let errs = check_admissibility(&dae).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, AdmissibilityError::HasContinuousStates)));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, AdmissibilityError::HasContinuousStates))
+        );
     }
 
     #[test]
@@ -283,7 +329,10 @@ mod tests {
         let mut dae = make_admissible_dae();
         dae.clocks.schedules.clear();
         let errs = check_admissibility(&dae).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, AdmissibilityError::NoClock)));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, AdmissibilityError::NoClock))
+        );
     }
 
     #[test]
@@ -295,7 +344,10 @@ mod tests {
             source_span: dummy_span(),
         });
         let errs = check_admissibility(&dae).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, AdmissibilityError::MultiRate { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, AdmissibilityError::MultiRate { .. }))
+        );
     }
 
     #[test]
@@ -318,7 +370,10 @@ mod tests {
         // eq_a is index 1, eq_b is index 0; a must appear before b in sorted order
         let pos_a = order.iter().position(|id| id.0 == 1).unwrap();
         let pos_b = order.iter().position(|id| id.0 == 0).unwrap();
-        assert!(pos_a < pos_b, "a (index 1) must be sorted before b (index 0)");
+        assert!(
+            pos_a < pos_b,
+            "a (index 1) must be sorted before b (index 0)"
+        );
     }
 
     #[test]
@@ -350,7 +405,11 @@ mod tests {
         let eqs: Vec<&Equation> = vec![&eq_a, &eq_b];
         let order = vec![StatementId(0), StatementId(1)];
         let groups = build_groups(&order, &eqs);
-        assert_eq!(groups.len(), 2, "different conditions should produce two groups");
+        assert_eq!(
+            groups.len(),
+            2,
+            "different conditions should produce two groups"
+        );
     }
 
     #[test]

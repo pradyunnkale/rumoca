@@ -220,10 +220,7 @@ impl SimulationSession {
         feature = "viewer-web",
         feature = "process-control"
     ))]
-    pub(crate) fn values_for(
-        &self,
-        names: &[String],
-    ) -> Result<IndexMap<String, f64>, SimError> {
+    pub(crate) fn values_for(&self, names: &[String]) -> Result<IndexMap<String, f64>, SimError> {
         self.inner.values_for(names)
     }
 

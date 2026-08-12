@@ -48,7 +48,9 @@ fn c_ctx(galec: &Galec) -> Value {
 
 fn rust_ctx(galec: &Galec) -> Value {
     let mut ctx = c_ctx(galec);
-    let integer_vars: Vec<String> = galec.variables.iter()
+    let integer_vars: Vec<String> = galec
+        .variables
+        .iter()
         .filter(|v| matches!(v.ty, GalecLiteral::Integer(_)))
         .map(|v| v.name.clone())
         .collect();
@@ -103,16 +105,16 @@ mod tests {
                 // unconditional: always increment count
                 GalecGroup {
                     condition: None,
-                    statements: vec![
-                        GalecStatement::Assign {
-                            lhs: "count".into(),
-                            rhs: GalecExpr::Binary {
-                                op: GalecBinaryOp::Add,
-                                lhs: Box::new(GalecExpr::PreviousRef { name: "count".into() }),
-                                rhs: Box::new(GalecExpr::Literal(GalecLiteral::Real(1.0))),
-                            },
+                    statements: vec![GalecStatement::Assign {
+                        lhs: "count".into(),
+                        rhs: GalecExpr::Binary {
+                            op: GalecBinaryOp::Add,
+                            lhs: Box::new(GalecExpr::PreviousRef {
+                                name: "count".into(),
+                            }),
+                            rhs: Box::new(GalecExpr::Literal(GalecLiteral::Real(1.0))),
                         },
-                    ],
+                    }],
                 },
                 // guarded: when u > 0, scale count by u and forward to y
                 GalecGroup {
@@ -126,13 +128,17 @@ mod tests {
                             lhs: "count".into(),
                             rhs: GalecExpr::Binary {
                                 op: GalecBinaryOp::Mul,
-                                lhs: Box::new(GalecExpr::SelfRef { name: "count".into() }),
+                                lhs: Box::new(GalecExpr::SelfRef {
+                                    name: "count".into(),
+                                }),
                                 rhs: Box::new(GalecExpr::SelfRef { name: "u".into() }),
                             },
                         },
                         GalecStatement::Assign {
                             lhs: "y".into(),
-                            rhs: GalecExpr::SelfRef { name: "count".into() },
+                            rhs: GalecExpr::SelfRef {
+                                name: "count".into(),
+                            },
                         },
                         GalecStatement::Assign {
                             lhs: "y".into(),
@@ -162,15 +168,24 @@ mod tests {
 
     #[test]
     fn print_rust() {
-        println!("=== Counter.rs ===\n{}", render_rust(&simple_galec()).unwrap());
+        println!(
+            "=== Counter.rs ===\n{}",
+            render_rust(&simple_galec()).unwrap()
+        );
     }
 
     #[test]
     fn render_produces_block_keyword() {
         let galec = simple_galec();
         let out = render(&galec).unwrap();
-        assert!(out.contains("block Counter"), "output must start with `block Counter`");
-        assert!(out.contains("end Counter;"), "output must end with `end Counter;`");
+        assert!(
+            out.contains("block Counter"),
+            "output must start with `block Counter`"
+        );
+        assert!(
+            out.contains("end Counter;"),
+            "output must end with `end Counter;`"
+        );
     }
 
     #[test]
@@ -198,20 +213,28 @@ mod tests {
         let protected_pos = out.find("protected").unwrap();
         let public_pos = out.find("public").unwrap();
         let count_pos = out.find("Real count;").unwrap();
-        assert!(count_pos > protected_pos && count_pos < public_pos,
-            "state variable must appear in protected section");
+        assert!(
+            count_pos > protected_pos && count_pos < public_pos,
+            "state variable must appear in protected section"
+        );
     }
 
     #[test]
     fn render_assignment_uses_self_prefix() {
         let out = render(&simple_galec()).unwrap();
-        assert!(out.contains("self.count :="), "assignments must use self. prefix");
+        assert!(
+            out.contains("self.count :="),
+            "assignments must use self. prefix"
+        );
     }
 
     #[test]
     fn render_previous_ref() {
         let out = render(&simple_galec()).unwrap();
-        assert!(out.contains("previous(self.count)"), "pre() must render as previous(self.x)");
+        assert!(
+            out.contains("previous(self.count)"),
+            "pre() must render as previous(self.x)"
+        );
     }
 
     #[test]
@@ -219,31 +242,30 @@ mod tests {
         let galec = Galec {
             name: "Guarded".into(),
             period: 0.01,
-            variables: vec![
-                GalecVariable {
-                    name: "x".into(),
-                    role: DataRole::State,
-                    ty: GalecLiteral::Real(0.0),
-                    dims: vec![],
-                    start: None,
-                },
-            ],
+            variables: vec![GalecVariable {
+                name: "x".into(),
+                role: DataRole::State,
+                ty: GalecLiteral::Real(0.0),
+                dims: vec![],
+                start: None,
+            }],
             startup: vec![],
             recalibrate: vec![],
-            do_step: vec![
-                GalecGroup {
-                    condition: Some(GalecExpr::SelfRef { name: "enable".into() }),
-                    statements: vec![
-                        GalecStatement::Assign {
-                            lhs: "x".into(),
-                            rhs: GalecExpr::Literal(GalecLiteral::Real(1.0)),
-                        },
-                    ],
-                },
-            ],
+            do_step: vec![GalecGroup {
+                condition: Some(GalecExpr::SelfRef {
+                    name: "enable".into(),
+                }),
+                statements: vec![GalecStatement::Assign {
+                    lhs: "x".into(),
+                    rhs: GalecExpr::Literal(GalecLiteral::Real(1.0)),
+                }],
+            }],
         };
         let out = render(&galec).unwrap();
-        assert!(out.contains("if self.enable then"), "guarded group must produce if statement");
+        assert!(
+            out.contains("if self.enable then"),
+            "guarded group must produce if statement"
+        );
         assert!(out.contains("end if;"));
     }
 }

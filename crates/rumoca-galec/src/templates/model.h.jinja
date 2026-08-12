@@ -16,7 +16,9 @@
 {%- if v.name == pname -%}{{ c_type(v.ty) }}{%- endif -%}
 {%- endfor -%}
 {%- endmacro -%}
-/* {{ name }} — GALEC-derived embedded C export (SPEC_0034 GAL-024). */
+/* {{ name }} — eFMI Production Code representation.
+ * Conformance surface: ProductionCode/manifest.xml.
+ * Generated from GALEC IR (SPEC_0034 GAL-024); do not edit by hand. */
 #ifndef {{ name_upper }}_GALEC_C_H
 #define {{ name_upper }}_GALEC_C_H
 
@@ -40,5 +42,11 @@ void {{ name }}_startup({{ name }}State *self);
 void {{ name }}_recalibrate({{ name }}State *self);
 /* DoStep   – one fixed-sample control-cycle tick. */
 void {{ name }}_dostep({{ name }}State *self);
+
+/* eFMI Production Code convenience macros (SPEC_0034 GAL-024). */
+#define EFMI_STATE_TYPE(name) name##State
+#define EFMI_INIT(name, self) name##_startup(self)
+#define EFMI_RECALIBRATE(name, self) name##_recalibrate(self)
+#define EFMI_STEP(name, self) name##_dostep(self)
 
 #endif /* {{ name_upper }}_GALEC_C_H */

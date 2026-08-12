@@ -33,7 +33,7 @@ pub enum DataRole {
 
 #[derive(Serialize)]
 pub enum GalecStatement {
-    Assign { lhs: String, rhs: GalecExpr }
+    Assign { lhs: String, rhs: GalecExpr },
 }
 
 #[derive(Serialize)]
@@ -45,21 +45,31 @@ pub struct GalecGroup {
 #[derive(Serialize)]
 pub enum GalecExpr {
     Literal(GalecLiteral),
-    SelfRef { name: String },
-    PreviousRef { name: String },
+    SelfRef {
+        name: String,
+    },
+    PreviousRef {
+        name: String,
+    },
     Binary {
         op: GalecBinaryOp,
         lhs: Box<GalecExpr>,
         rhs: Box<GalecExpr>,
     },
     Negate(Box<GalecExpr>),
-    Call { name: String, args: Vec<GalecExpr> },
+    Call {
+        name: String,
+        args: Vec<GalecExpr>,
+    },
     If {
         condition: Box<GalecExpr>,
         then_branch: Box<GalecExpr>,
         else_branch: Box<GalecExpr>,
     },
-    Index { base: Box<GalecExpr>, subscripts: Vec<GalecExpr> },
+    Index {
+        base: Box<GalecExpr>,
+        subscripts: Vec<GalecExpr>,
+    },
 }
 
 #[derive(Serialize)]
@@ -71,7 +81,17 @@ pub enum GalecLiteral {
 
 #[derive(Serialize)]
 pub enum GalecBinaryOp {
-    Add, Sub, Mul, Div, Pow,
-    And, Or,
-    Eq, Neq, Lt, Lte, Gt, Gte,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    And,
+    Or,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
 }

@@ -4321,6 +4321,7 @@ dependencies = [
  "minijinja",
  "rayon",
  "rumoca-core",
+ "rumoca-galec",
  "rumoca-ir-ast",
  "rumoca-ir-dae",
  "rumoca-ir-flat",

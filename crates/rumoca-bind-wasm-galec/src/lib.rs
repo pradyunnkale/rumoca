@@ -176,7 +176,8 @@ fn render_galec_impl(
             analysis,
             model_name: model_id.clone(),
         },
-    );
+    )
+    .map_err(|e| format!("GALEC transformation failed: {e}"))?;
 
     // 3. Render the .alg block (always) then target-specific sources.
     let alg = rumoca_galec::render::render(&galec)
