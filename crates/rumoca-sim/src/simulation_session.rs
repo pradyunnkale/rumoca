@@ -2,7 +2,15 @@ use indexmap::IndexMap;
 use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
 
-#[cfg(feature = "scheduled-sim")]
+#[cfg(all(
+    feature = "scheduled-sim",
+    feature = "scenario-config",
+    feature = "input-keyboard",
+    feature = "transport-udp",
+    feature = "transport-zenoh",
+    feature = "viewer-web",
+    feature = "process-control"
+))]
 use crate::SimulationSessionApi;
 use crate::{SimSolverMode, SimulationDiagnosticError};
 
@@ -177,7 +185,15 @@ impl SimulationSession {
     }
 }
 
-#[cfg(feature = "scheduled-sim")]
+#[cfg(all(
+    feature = "scheduled-sim",
+    feature = "scenario-config",
+    feature = "input-keyboard",
+    feature = "transport-udp",
+    feature = "transport-zenoh",
+    feature = "viewer-web",
+    feature = "process-control"
+))]
 impl SimulationSessionApi for SimulationSession {
     type Error = SimulationDiagnosticError;
 
@@ -205,7 +221,10 @@ impl SimulationSessionApi for SimulationSession {
         Self::get(self, name)
     }
 
-    fn values_for(&self, names: &[String]) -> Result<Option<IndexMap<String, f64>>, Self::Error> {
+    fn values_for(
+        &self,
+        names: &[String],
+    ) -> Result<Option<IndexMap<String, f64>>, Self::Error> {
         match &self.inner {
             #[cfg(feature = "solver-diffsol")]
             SimulationSessionInner::Diffsol(session) => session

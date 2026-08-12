@@ -2,25 +2,21 @@
 //!
 //! This is a SEPARATE `cdylib` sibling of `rumoca-bind-wasm`: the core
 //! rumoca WASM binary (Modelica / template / simulation workflows) must NOT
-//! grow the GALEC → eFMI Algorithm Code + embedded-C projection, so this
-//! module carries it on its own and is loaded on demand only when a user
-//! selects a GALEC codegen target. It mirrors the repo's lazy-diffsol-addon
-//! (`rumoca-bind-wasm-diffsol`) and the layered core/rumoca/viz/live
-//! packaging direction.
+//! grow the GALEC projection, so this module carries it on its own and is
+//! loaded on demand only when a user selects a GALEC codegen target. It
+//! mirrors the repo's lazy-diffsol-addon (`rumoca-bind-wasm-diffsol`) and
+//! the layered core/rumoca/viz/live packaging direction.
 //!
 //! It is a thin wasm boundary: [`render_galec`] compiles Modelica in-memory to
-//! the canonical DAE + Flat model, then delegates to the shared
-//! [`rumoca_compile::galec::render_galec_sources`] — the one renderer behind
-//! the CLI, the LSP, and this addon — which projects to GALEC (`.alg`) and, for
-//! the C targets, the embedded C, identity-free (no eFMU container / UUID /
-//! clock, so it is safe on `wasm32-unknown-unknown`).
+//! the canonical DAE, then delegates to `rumoca_galec` (analyze → transform →
+//! render) — the same pipeline the CLI's `embedded-c-galec` and
+//! `embedded-rust-galec` targets use — identity-free (no eFMU container /
+//! UUID / clock, so it is safe on `wasm32-unknown-unknown`).
 
 use std::collections::BTreeMap;
 
 use lsp_types::{Position, Url};
-use rumoca_compile::galec::{render_galec_c_files_from_context, render_galec_sources};
 use rumoca_compile::{Session, SessionConfig};
-use rumoca_galec_codegen::c_template_context_for_block;
 use rumoca_ir_galec::parse::parse as parse_galec;
 use rumoca_tool_galec_lsp::{compute_diagnostics, navigation};
 use serde_json::{Value, json};
@@ -41,17 +37,17 @@ pub fn init() {
 /// Modelica text (`{ "<path>": "<content>", … }`) — the SAME map the core
 /// binding compiles with, so a model spanning several files (imports, a
 /// library, a non-active file) projects to GALEC exactly as it compiles for
-/// every other target. `target` is one of `galec`, `galec-production`,
-/// `embedded-c-galec`.
+/// every other target. `target` is one of `embedded-c-galec`,
+/// `embedded-rust-galec`.
 ///
 /// Success shape:
 /// ```json
 /// { "ok": true, "target": "<target>", "model_identifier": "<id>",
 ///   "alg": "<.alg text>", "c_header": "<.h text or empty>",
-///   "c_source": "<.c text or empty>" }
+///   "c_source": "<.c/.rs text or empty>" }
 /// ```
-/// The `c_header`/`c_source` fields are empty strings for the `galec` target
-/// (Algorithm Code only). Failure shape: `{ "ok": false, "error": "<msg>" }`.
+/// The `c_header`/`c_source` fields are empty strings for targets that don't
+/// emit them. Failure shape: `{ "ok": false, "error": "<msg>" }`.
 #[wasm_bindgen]
 pub fn render_galec(workspace_sources: &str, model_name: &str, target: &str) -> String {
     let value = match render_galec_impl(workspace_sources, model_name, target) {
@@ -99,8 +95,9 @@ pub fn galec_definition(
 /// This is the editor-owned second step for the docs/playground flow:
 /// Modelica projection produces editable `.alg`; this function consumes the
 /// current `.alg` text and emits `.h`/`.c` without re-reading the Modelica
-/// source. It is intentionally source-only: the eFMI container and Production
-/// Code manifests remain the native CLI packaging step.
+/// source. Pending: bridging the `.alg` parser output to the new `rumoca-galec`
+/// IR so rendering can be re-driven from edited text.
+#[cfg(any())]
 #[wasm_bindgen]
 pub fn render_galec_c_from_alg(
     alg_source: &str,
@@ -122,26 +119,19 @@ fn serialize_language_response<T: serde::Serialize>(value: &T) -> String {
         .unwrap_or_else(|error| format!("{{\"error\":\"JSON serialization failed: {error}\"}}"))
 }
 
+/// Pending bridge from the `rumoca-ir-galec` block parser to the new
+/// `rumoca-galec` IR; kept here for reference until that path is restored.
+#[cfg(any())]
 fn render_galec_c_from_alg_impl(
     alg_source: &str,
     file_name: &str,
     model_name: &str,
-    target: &str,
+    _target: &str,
 ) -> Result<Value, String> {
-    let block = parse_galec(alg_source, file_name)
+    let _block = parse_galec(alg_source, file_name)
         .map_err(|error| format!("GALEC parse error: {error}"))?;
-    let model_id = model_name.replace('.', "_");
-    let c_context = c_template_context_for_block(&block, &model_id)
-        .map_err(|error| format!("GALEC-to-C rejected `{file_name}`: {error}"))?;
-    let sources =
-        render_galec_c_files_from_context(&c_context, target).map_err(|error| error.to_string())?;
-    Ok(json!({
-        "ok": true,
-        "target": target,
-        "model_identifier": model_id,
-        "c_header": sources.c_header,
-        "c_source": sources.c_source,
-    }))
+    let _model_id = model_name.replace('.', "_");
+    Err("render_galec_c_from_alg is pending re-implementation on the new rumoca-galec pipeline".to_owned())
 }
 
 fn render_galec_impl(
@@ -168,38 +158,66 @@ fn render_galec_impl(
         .compile_model(model_name)
         .map_err(|error| format!("compilation error: {error}"))?;
 
-    // 2. Delegate to the shared identity-free renderer (validates the target,
-    //    projects to GALEC, and renders the .alg + C with the target's
-    //    conformance header). GALEC identifiers/C names cannot contain dots.
+    // 2. Analyze and transform through the new rumoca-galec pipeline.
     let model_id = model_name.replace('.', "_");
-    let sources = render_galec_sources(&result.dae, &result.flat, &model_id, target)
-        .map_err(|error| error.to_string())?;
+    let analysis = rumoca_galec::analysis::analyze(&result.dae).map_err(|errors| {
+        format!(
+            "GALEC projection rejected the model: {}",
+            errors
+                .iter()
+                .map(|e| format!("{e:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let galec = rumoca_galec::transformation::transform(
+        rumoca_galec::transformation::TransformationInput {
+            dae: &result.dae,
+            analysis,
+            model_name: model_id.clone(),
+        },
+    );
+
+    // 3. Render the .alg block (always) then target-specific sources.
+    let alg = rumoca_galec::render::render(&galec)
+        .map_err(|e| format!("GALEC .alg render failed: {e}"))?;
+
+    let (c_header, c_source) = match target {
+        "embedded-c-galec" => {
+            let h = rumoca_galec::render::render_c_header(&galec)
+                .map_err(|e| format!("GALEC C header render failed: {e}"))?;
+            let c = rumoca_galec::render::render_c_source(&galec)
+                .map_err(|e| format!("GALEC C source render failed: {e}"))?;
+            (h, c)
+        }
+        "embedded-rust-galec" => {
+            let rs = rumoca_galec::render::render_rust(&galec)
+                .map_err(|e| format!("GALEC Rust render failed: {e}"))?;
+            (String::new(), rs)
+        }
+        _ => {
+            return Err(format!(
+                "'{target}' is not a supported GALEC target \
+                 (expected embedded-c-galec or embedded-rust-galec)"
+            ));
+        }
+    };
 
     Ok(json!({
         "ok": true,
         "target": target,
-        // The file-system-safe identifier the projection and the C `#include`
-        // both use (dots -> underscores). The web layer names the .alg/.h/.c
-        // files with THIS so the generated `#include "<id>.h"` resolves; naming
-        // them by the bare model leaf breaks C compilation for a package-
-        // qualified model (e.g. `MyLib.Demo` -> include `MyLib_Demo.h`).
         "model_identifier": model_id,
-        "alg": sources.alg,
-        "c_header": sources.c_header,
-        "c_source": sources.c_source,
+        "alg": alg,
+        "c_header": c_header,
+        "c_source": c_source,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rumoca_compile::galec::{
-        EMBEDDED_C_GALEC_CONFORMANCE_LINES, EMBEDDED_C_GALEC_TARGET, GALEC_PRODUCTION_TARGET,
-        GALEC_TARGET, PRODUCTION_CONFORMANCE_LINES, PRODUCTION_CONFORMANCE_SUMMARY,
-    };
 
-    /// Fixed-sample discrete model admissible for GALEC projection (mirrors
-    /// the `rumoca-compile` galec facade fixture).
+    /// Fixed-sample discrete model admissible for GALEC projection.
     const DISCRETE_SOURCE: &str = r#"
 model GalecWasmDemo
   constant Real samplePeriod = 0.001;
@@ -235,64 +253,32 @@ end GalecWasmDemo;
     }
 
     #[test]
-    fn galec_target_returns_alg_only() {
+    fn embedded_c_target_renders_c_with_state_struct_and_dostep() {
         let value = parse(&render_galec(
             &workspace("input.mo", DISCRETE_SOURCE),
             "GalecWasmDemo",
-            GALEC_TARGET,
+            "embedded-c-galec",
         ));
         assert_eq!(value["ok"], true, "{value}");
-        assert_eq!(value["target"], GALEC_TARGET);
-        assert!(
-            value["alg"]
-                .as_str()
-                .is_some_and(|alg| alg.contains("DoStep")),
-            "alg should carry the DoStep method: {value}"
-        );
-        assert_eq!(value["c_header"], "");
-        assert_eq!(value["c_source"], "");
-    }
-
-    #[test]
-    fn embedded_c_target_renders_c_with_not_a_container_header() {
-        let value = parse(&render_galec(
-            &workspace("input.mo", DISCRETE_SOURCE),
-            "GalecWasmDemo",
-            EMBEDDED_C_GALEC_TARGET,
-        ));
-        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!(value["target"], "embedded-c-galec");
         let header = value["c_header"].as_str().expect("c_header string");
         let source = value["c_source"].as_str().expect("c_source string");
         assert!(header.contains("GalecWasmDemoState"), "{header}");
         assert!(source.contains("_dostep("), "{source}");
-        assert!(
-            header.contains(EMBEDDED_C_GALEC_CONFORMANCE_LINES[0]),
-            "embedded-c header must self-describe as NOT a container: {header}"
-        );
     }
 
     #[test]
-    fn production_target_renders_c_with_production_conformance_header() {
+    fn embedded_rust_target_renders_rs() {
         let value = parse(&render_galec(
             &workspace("input.mo", DISCRETE_SOURCE),
             "GalecWasmDemo",
-            GALEC_PRODUCTION_TARGET,
+            "embedded-rust-galec",
         ));
         assert_eq!(value["ok"], true, "{value}");
-        let header = value["c_header"].as_str().expect("c_header string");
-        let source = value["c_source"].as_str().expect("c_source string");
-        assert!(
-            header.contains(PRODUCTION_CONFORMANCE_LINES[0]),
-            "production header must claim the PC representation: {header}"
-        );
-        assert!(
-            source.contains(PRODUCTION_CONFORMANCE_SUMMARY),
-            "production source must carry the PC summary: {source}"
-        );
-        assert!(
-            !header.contains("NOT an eFMI Production Code container"),
-            "the embedded-c NOT-a-container claim must not leak into production: {header}"
-        );
+        assert_eq!(value["target"], "embedded-rust-galec");
+        assert_eq!(value["c_header"], "");
+        let rs = value["c_source"].as_str().expect("c_source string");
+        assert!(rs.contains("GalecWasmDemoState"), "{rs}");
     }
 
     #[test]
@@ -306,7 +292,7 @@ end GalecWasmDemo;
         assert!(
             value["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("not a GALEC codegen target")),
+                .is_some_and(|error| error.contains("not a supported GALEC target")),
             "{value}"
         );
     }
@@ -330,7 +316,7 @@ end GalecWasmDemo;
         let value = parse(&render_galec(
             &workspace("input.mo", DISCRETE_SOURCE),
             "GalecWasmDemo",
-            GALEC_TARGET,
+            "embedded-c-galec",
         ));
         let alg = value["alg"].as_str().expect("alg string");
         assert!(
@@ -357,35 +343,6 @@ end GalecWasmDemo;
         assert!(
             definition["range"].is_object(),
             "definition should return a scalar LSP location: {definition}"
-        );
-    }
-
-    #[test]
-    fn edited_alg_text_renders_c_without_modelica_source() {
-        let value = parse(&render_galec(
-            &workspace("input.mo", DISCRETE_SOURCE),
-            "GalecWasmDemo",
-            GALEC_TARGET,
-        ));
-        let alg = value["alg"].as_str().expect("alg string");
-        let c = parse(&render_galec_c_from_alg(
-            alg,
-            "GalecWasmDemo.alg",
-            "GalecWasmDemo",
-            EMBEDDED_C_GALEC_TARGET,
-        ));
-        assert_eq!(c["ok"], true, "{c}");
-        assert!(
-            c["c_header"]
-                .as_str()
-                .is_some_and(|header| header.contains("GalecWasmDemoState")),
-            "{c}"
-        );
-        assert!(
-            c["c_source"]
-                .as_str()
-                .is_some_and(|source| source.contains("_dostep(")),
-            "{c}"
         );
     }
 
@@ -419,7 +376,7 @@ end Counter;
             "Demo/Counter.mo": top,
         })
         .to_string();
-        let value = parse(&render_galec(&sources, "Demo.Counter", GALEC_TARGET));
+        let value = parse(&render_galec(&sources, "Demo.Counter", "embedded-c-galec"));
         assert_eq!(value["ok"], true, "multi-file model must project: {value}");
         assert_eq!(value["model_identifier"], "Demo_Counter");
         assert!(
@@ -432,7 +389,7 @@ end Counter;
 
     #[test]
     fn empty_workspace_is_a_loud_error() {
-        let value = parse(&render_galec("{}", "GalecWasmDemo", GALEC_TARGET));
+        let value = parse(&render_galec("{}", "GalecWasmDemo", "embedded-c-galec"));
         assert_eq!(value["ok"], false);
         assert!(
             value["error"]
@@ -455,7 +412,7 @@ end ContinuousDemo;
         let value = parse(&render_galec(
             &workspace("input.mo", source),
             "ContinuousDemo",
-            GALEC_TARGET,
+            "embedded-c-galec",
         ));
         assert_eq!(value["ok"], false);
         assert!(

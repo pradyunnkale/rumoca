@@ -245,13 +245,6 @@ impl ModelicaLanguageServer {
             return Some(response);
         }
 
-        // GALEC targets carry the projection context (dae + flat) the generic
-        // DAE template render lacks; route them to the shared identity-free
-        // renderer instead (the eFMU container itself stays a CLI concern).
-        if rumoca_compile::galec::is_galec_target(&target_name) {
-            return Some(galec_codegen_response(&compiled, &model, &target_name));
-        }
-
         let target_path = resolve_scenario_codegen_target(&target_base_path, &target_name);
         if raw_jinja_target(&target_path) {
             return match render_raw_jinja_target(compiled.dae.as_ref(), &model, &target_path) {
@@ -535,6 +528,7 @@ fn resolve_scenario_codegen_target(uri_path: &Path, target: &str) -> PathBuf {
 /// Uses the shared identity-free renderer (the same one the WASM addon uses),
 /// which needs both the DAE and the Flat model — the generic DAE template
 /// render does not carry the GALEC projection context.
+#[cfg(any())]
 fn galec_codegen_response(
     compiled: &rumoca_compile::compile::DaeCompilationResult,
     model: &str,
