@@ -116,7 +116,6 @@ pub fn render_galec_c_from_alg(
     })
 }
 
-
 /// Pending bridge from the `rumoca-ir-galec` block parser to the new
 /// `rumoca-galec` IR; kept here for reference until that path is restored.
 #[cfg(any())]
@@ -129,7 +128,10 @@ fn render_galec_c_from_alg_impl(
     let _block = parse_galec(alg_source, file_name)
         .map_err(|error| format!("GALEC parse error: {error}"))?;
     let _model_id = model_name.replace('.', "_");
-    Err("render_galec_c_from_alg is pending re-implementation on the new rumoca-galec pipeline".to_owned())
+    Err(
+        "render_galec_c_from_alg is pending re-implementation on the new rumoca-galec pipeline"
+            .to_owned(),
+    )
 }
 
 fn render_galec_impl(
