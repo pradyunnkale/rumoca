@@ -51,6 +51,7 @@ members = [
     # Bindings
     "crates/rumoca-bind-wasm",
     "crates/rumoca-bind-wasm-diffsol",
+    "crates/rumoca-bind-wasm-galec",
     "crates/rumoca-bind-python",
     # Compiled execution adapters
     "crates/rumoca-exec-cranelift",
@@ -59,10 +60,8 @@ members = [
 ]
 exclude = [
     # `rumoca-tool-galec-lsp` needs updating to use the new `rumoca-galec` IR.
-    # `rumoca-bind-wasm-galec` depends on it and is excluded as a consequence.
     # The GALEC projection pipeline itself is complete in `rumoca-galec`.
     "crates/rumoca-tool-galec-lsp",
-    "crates/rumoca-bind-wasm-galec",
 ]
 
 [workspace.package]

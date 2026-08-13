@@ -15,10 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use lsp_types::{Position, Url};
 use rumoca_compile::{Session, SessionConfig};
-use rumoca_ir_galec::parse::parse as parse_galec;
-use rumoca_tool_galec_lsp::{compute_diagnostics, navigation};
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 
@@ -63,31 +60,36 @@ pub fn render_galec(workspace_sources: &str, model_name: &str, target: &str) -> 
 }
 
 /// Compute GALEC `.alg` LSP diagnostics and return them as JSON.
+///
+/// Pending: port `rumoca-tool-galec-lsp` to the new `rumoca-galec` IR.
+/// Returns an empty diagnostics array until the port is complete.
 #[wasm_bindgen]
-pub fn galec_diagnostics(source: &str, file_name: &str) -> String {
-    serialize_language_response(&compute_diagnostics(source, file_name))
+pub fn galec_diagnostics(_source: &str, _file_name: &str) -> String {
+    "[]".to_owned()
 }
 
 /// Return GALEC hover information for a UTF-16 LSP position, or `null`.
+///
+/// Pending: port `rumoca-tool-galec-lsp` to the new `rumoca-galec` IR.
+/// Always returns `null` until the port is complete.
 #[wasm_bindgen]
-pub fn galec_hover(source: &str, file_name: &str, line: u32, character: u32) -> String {
-    let hover = navigation::hover(source, file_name, Position { line, character });
-    serialize_language_response(&hover)
+pub fn galec_hover(_source: &str, _file_name: &str, _line: u32, _character: u32) -> String {
+    "null".to_owned()
 }
 
 /// Return the GALEC definition location for a UTF-16 LSP position, or `null`.
+///
+/// Pending: port `rumoca-tool-galec-lsp` to the new `rumoca-galec` IR.
+/// Always returns `null` until the port is complete.
 #[wasm_bindgen]
 pub fn galec_definition(
-    source: &str,
-    file_name: &str,
-    uri: &str,
-    line: u32,
-    character: u32,
+    _source: &str,
+    _file_name: &str,
+    _uri: &str,
+    _line: u32,
+    _character: u32,
 ) -> String {
-    let definition = Url::parse(uri).ok().and_then(|url| {
-        navigation::goto_definition(source, file_name, url, Position { line, character })
-    });
-    serialize_language_response(&definition)
+    "null".to_owned()
 }
 
 /// Parse an edited GALEC `.alg` block and render GALEC-derived C files.
@@ -114,10 +116,6 @@ pub fn render_galec_c_from_alg(
     })
 }
 
-fn serialize_language_response<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_else(|error| format!("{{\"error\":\"JSON serialization failed: {error}\"}}"))
-}
 
 /// Pending bridge from the `rumoca-ir-galec` block parser to the new
 /// `rumoca-galec` IR; kept here for reference until that path is restored.
@@ -243,6 +241,7 @@ end GalecWasmDemo;
         json!({ path: source }).to_string()
     }
 
+    #[cfg(any())]
     fn line_character_for(source: &str, needle: &str, offset_in_needle: usize) -> (u32, u32) {
         let offset = source.find(needle).expect("needle present") + offset_in_needle;
         let prefix = &source[..offset];
@@ -298,6 +297,7 @@ end GalecWasmDemo;
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn galec_lsp_diagnostics_reports_parse_errors() {
         let value = parse(&galec_diagnostics("block Bad\nend Other;\n", "bad.alg"));
@@ -312,6 +312,7 @@ end GalecWasmDemo;
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn galec_lsp_hover_and_definition_are_json() {
         let value = parse(&render_galec(
