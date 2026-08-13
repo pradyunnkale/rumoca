@@ -165,7 +165,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = "3.0"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "js"] }
 walkdir = "2.5"
 zip = "2.4"
 # LSP types (usable from WASM and native, must match tower-lsp's version)

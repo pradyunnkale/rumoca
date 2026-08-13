@@ -6,7 +6,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum TransformError {
     UnsupportedExpression(String),
-    /// [ET017] A builtin function not supported by the GALEC spec is used.
+    /// \[ET017\] A builtin function not supported by the GALEC spec is used.
     UnsupportedBuiltin {
         feature: String,
         source_expr: String,
